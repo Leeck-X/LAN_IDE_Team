@@ -12,6 +12,8 @@ clangd-windows.zip
 build/
 dist/
 *.manifest
+LAN_IDE_Setup.exe
+LAN_IDE.7z
 
 # 系统/编辑器
 .DS_Store
