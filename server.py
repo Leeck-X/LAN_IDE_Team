@@ -422,7 +422,7 @@ class ClangdClient:
                 },
                 "workspaceFolders": [{"uri": path_to_uri(WORKSPACE), "name": "workspace"}],
                 "initializationOptions": {
-                    "fallbackFlags": ["-std=c++17", "--target=x86_64-w64-mingw32"] + get_system_include_flags(),
+                    "fallbackFlags": ["-std=c++17", "--target=x86_64-w64-mingw32", "-Wall", "-Wextra"] + get_system_include_flags(),
                 },
             }, timeout=15)
             if resp is None:

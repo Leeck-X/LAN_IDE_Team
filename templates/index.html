@@ -746,6 +746,17 @@
                         <div id="cph-list"></div>
                     </div>
                 </div>
+
+                <!-- 问题面板 -->
+                <div class="dock-pane" id="pane-problems">
+                    <div id="problems-content">
+                        <div id="problems-toolbar">
+                            <span id="problems-summary"></span>
+                            <button class="btn" id="problems-clear" title="清除问题列表">清除</button>
+                        </div>
+                        <div id="problems-list"></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -846,6 +857,10 @@
         const dockPin = document.getElementById('dock-pin');
         const dockGrip = document.getElementById('dock-grip');
         const consolePanel = document.getElementById('pane-console');
+        const problemsPanel = document.getElementById('pane-problems');
+        const problemsSummary = document.getElementById('problems-summary');
+        const problemsBadge = document.getElementById('problems-badge');
+        const problemsList = document.getElementById('problems-list');
         const consoleStatus = document.getElementById('console-status');
         const consoleOutput = document.getElementById('console-output');
         const consoleInput = document.getElementById('console-input');
@@ -1019,6 +1034,7 @@
                     endLine: (e.line ?? 0) + 1,
                     endColumn: (e.character ?? 0) + 1,
                     source: d.source || 'clangd',
+                    code: d.code ?? '',
                 };
             }).sort((a,b) => (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9) || a.line - b.line);
             renderProblems();
@@ -3188,13 +3204,18 @@
                 const rangeText = (p.endLine && p.endColumn && (p.endLine !== p.line || p.endColumn !== p.column))
                     ? `${p.line}:${p.column} - ${p.endLine}:${p.endColumn}`
                     : `${p.line}:${p.column}`;
+                const meta = [];
+                if(p.source) meta.push(p.source);
+                if(p.code !== undefined && p.code !== null && p.code !== '') meta.push(String(p.code));
+                const metaText = meta.length ? '  [' + meta.join(': ') + ']' : '';
                 const row = document.createElement('div');
                 row.className = 'prob-row';
+                row.title = p.message + (meta.length ? ' [' + meta.join(': ') + ']' : '');
                 row.innerHTML = `
                     <span class="prob-sev ${sevClass[p.severity] || 'hint'}">${sevLabel[p.severity] || 'H'}</span>
                     <div class="prob-body">
                         <div class="prob-msg">${escapeHtml(p.message)}</div>
-                        <div class="prob-loc">${escapeHtml(fileName)}:${rangeText}</div>
+                        <div class="prob-loc">${escapeHtml(fileName)}:${rangeText}${escapeHtml(metaText)}</div>
                     </div>`;
                 row.addEventListener('click', () => gotoProblem(p));
                 problemsList.appendChild(row);
@@ -3258,6 +3279,16 @@
                 const lineHeight = parseFloat(getComputedStyle(codeEl).lineHeight) || 21;
                 codeEl.scrollTop = Math.max(0, (p.line - 1) * lineHeight);
             }
+        }
+        const problemsClear = document.getElementById('problems-clear');
+        if(problemsClear){
+            problemsClear.addEventListener('click', () => {
+                problemList = [];
+                renderProblems();
+                if(monacoEditor && monacoEditor.getModel()){
+                    monaco.editor.setModelMarkers(monacoEditor.getModel(), 'clangd', []);
+                }
+            });
         }
 
         // ===================== 初始化 =====================
