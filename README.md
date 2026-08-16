@@ -36,7 +36,7 @@ python server.py
 | clangd 22.1.6 | LSP 补全与诊断 | 位于 `tools/clangd/`，体积大未入库 |
 | Monaco Editor | 前端编辑器 | 位于 `static/monaco/`，体积大未入库 |
 
-`tools/` 与 `static/monaco/` 因体积大未提交到仓库。克隆后需自行放置，或运行 `IT.bat` 下载 Monaco 与 Socket.IO（clangd 需手动放入 `tools/clangd/clangd_22.1.6/`）。
+`tools/` 与 `static/monaco/` 因体积大未提交到仓库。克隆后运行 `setup_environment.bat` 一键下载 Monaco、Socket.IO 与 clangd（clangd 走 GitHub 官方源，约 50MB，下载失败时需代理或手动放入 `tools/clangd/clangd_22.1.6/`）。
 
 ## 打包为 exe
 
@@ -74,7 +74,7 @@ make_sfx.bat
 ├── LAN_IDE.spec          # PyInstaller 打包配置
 ├── make_sfx.bat          # 7-Zip 自解压安装包生成脚本
 ├── sfx_config.txt        # 自解压配置
-└── IT.bat                # 一键环境搭建（下载 Monaco / Socket.IO）
+└── setup_environment.bat # 一键环境搭建（检测 Python/编译器，下载依赖、Monaco、Socket.IO 与 clangd）
 ```
 
 ## 测试点规范
