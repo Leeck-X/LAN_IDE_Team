@@ -3,12 +3,15 @@ workspace/
 __pycache__/
 *.pyc
 
-# 依赖工具(体积大, 用 IT.bat 或官网获取)
+# 依赖工具(体积大, 用 setup_environment.bat 或官网获取)
 tools/
 static/monaco/
 clangd-windows.zip
 
-# PyInstaller 打包产物
+# 本地打包成 exe 的工具与产物(仅本地保留, 不上传)
+LAN_IDE.spec
+make_sfx.bat
+sfx_config.txt
 build/
 dist/
 *.manifest

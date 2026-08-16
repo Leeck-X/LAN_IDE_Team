@@ -15,14 +15,21 @@
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
-pip install flask flask-socketio psutil
+# Windows：一键搭建环境（安装依赖 + 下载前端资源与 clangd + 检测编译器）
+setup_environment.bat
 
-# 2. 启动
+# 启动
 python server.py
 ```
 
 浏览器访问 `http://localhost:5000`，局域网内其他机器访问打印出的局域网地址。
+
+也可以手动安装依赖：
+
+```bash
+pip install flask flask-socketio psutil
+python server.py
+```
 
 > C++ 编译运行需要系统已安装 `g++`（MinGW-w64）或 `clang++`（LLVM）。缺失时前端会提示。
 
@@ -30,51 +37,26 @@ python server.py
 
 | 依赖 | 用途 | 说明 |
 |---|---|---|
-| Python 3.9+ | 运行时 | 打包后不再需要 |
-| flask / flask-socketio / psutil | 后端框架与资源统计 | 打包后内嵌 |
+| Python 3.9+ | 运行时 | 运行必需 |
+| flask / flask-socketio / psutil | 后端框架与资源统计 | 运行必需 |
 | g++ 或 clang++ | 编译运行 | 需系统 PATH 中存在 |
 | clangd 22.1.6 | LSP 补全与诊断 | 位于 `tools/clangd/`，体积大未入库 |
 | Monaco Editor | 前端编辑器 | 位于 `static/monaco/`，体积大未入库 |
 
 `tools/` 与 `static/monaco/` 因体积大未提交到仓库。克隆后运行 `setup_environment.bat` 一键下载 Monaco、Socket.IO 与 clangd（clangd 走 GitHub 官方源，约 50MB，下载失败时需代理或手动放入 `tools/clangd/clangd_22.1.6/`）。
 
-## 打包为 exe
-
-```bash
-python -m PyInstaller --noconfirm LAN_IDE.spec
-```
-
-产物在 `dist/LAN_IDE/`，其中 `_internal/` 为 Python 运行时与前端，`tools/clangd/` 需手动复制到该目录旁（`dist/LAN_IDE/tools/clangd/`）。
-
-## 生成自解压安装程序
-
-需已安装 [7-Zip](https://www.7-zip.org/)：
-
-```bash
-make_sfx.bat
-```
-
-生成 `LAN_IDE_Setup.exe`（约 56MB），双击解压后自动运行 `LAN_IDE.exe`。路径检测支持：
-
-- `C:\Program Files\7-Zip\`
-- `C:\Program Files (x86)\7-Zip\`
-- `D:\Apps\Compress\7z\7-Zip\`
-
 ## 目录结构
 
 ```
 .
-├── server.py             # 后端（Flask 路由 + Socket.IO 事件 + clangd LSP + 评测线程池）
-├── templates/index.html  # 前端（单文件，含全部 UI 与逻辑）
-├── static/               # 前端静态资源
+├── server.py              # 后端（Flask 路由 + Socket.IO 事件 + clangd LSP + 评测线程池）
+├── templates/index.html   # 前端（单文件，含全部 UI 与逻辑）
+├── static/                # 前端静态资源
 │   ├── socket.io.min.js
-│   └── monaco/           # Monaco Editor（未入库）
-├── tools/clangd/         # clangd LSP（未入库）
-├── workspace/            # 运行时工作区（自动创建，未入库）
-├── LAN_IDE.spec          # PyInstaller 打包配置
-├── make_sfx.bat          # 7-Zip 自解压安装包生成脚本
-├── sfx_config.txt        # 自解压配置
-└── setup_environment.bat # 一键环境搭建（检测 Python/编译器，下载依赖、Monaco、Socket.IO 与 clangd）
+│   └── monaco/            # Monaco Editor（未入库）
+├── tools/clangd/          # clangd LSP（未入库）
+├── workspace/             # 运行时工作区（自动创建，未入库）
+└── setup_environment.bat  # 一键环境搭建（检测 Python/编译器，下载依赖、Monaco、Socket.IO 与 clangd）
 ```
 
 ## 测试点规范
