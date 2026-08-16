@@ -1,0 +1,15 @@
+# 运行时数据
+workspace/
+__pycache__/
+*.pyc
+
+# 依赖工具(体积大, 用 IT.bat 或官网获取)
+tools/
+static/monaco/
+clangd-windows.zip
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
