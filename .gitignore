@@ -8,6 +8,11 @@ tools/
 static/monaco/
 clangd-windows.zip
 
+# PyInstaller 打包产物
+build/
+dist/
+*.manifest
+
 # 系统/编辑器
 .DS_Store
 Thumbs.db

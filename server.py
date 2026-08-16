@@ -22,13 +22,25 @@ try:
 except ImportError:
     psutil = None
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def app_root() -> str:
+    """可执行文件所在目录(可写)。PyInstaller 冻结时为 exe 所在目录, 否则为脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def resource_path(rel: str) -> str:
+    """只读资源目录。PyInstaller 冻结时从 _MEIPASS 解压目录读取模板与静态资源。"""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, rel)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
+
+BASE_DIR = app_root()
 WORKSPACE = os.path.join(BASE_DIR, "workspace")
 os.makedirs(WORKSPACE, exist_ok=True)
 
 app = Flask(__name__,
-            template_folder="templates",
-            static_folder="static",
+            template_folder=resource_path("templates"),
+            static_folder=resource_path("static"),
             static_url_path="/static")
 app.config["SECRET_KEY"] = "cpp26-ide-secret"
 app.config["TEMPLATES_AUTO_RELOAD"] = True
