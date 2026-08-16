@@ -204,9 +204,25 @@
         #editor-wrap{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;}
         #empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-lo);font-size:13px;flex-direction:column;gap:8px;}
         #editor-host{flex:1;min-height:0;display:none;background:#1e2228;flex-direction:column;}
-        #editor-frame{display:flex;flex:1;min-height:0;}
+        #editor-frame{display:flex;flex:1;min-height:0;position:relative;}
         #gutter{flex:0 0 auto;width:46px;background:#1a1e24;color:var(--text-lo);font-family:var(--mono);font-size:13.5px;line-height:1.6;text-align:right;padding:14px 8px 14px 0;overflow:hidden;user-select:none;white-space:pre;}
         #code{flex:1;resize:none;border:none;outline:none;background:transparent;color:var(--text-hi);font-family:var(--mono);font-size:13.5px;line-height:1.6;padding:14px 16px;tab-size:4;white-space:pre;overflow:auto;}
+        #code-overlay{
+            position:absolute;
+            left:46px;top:0;bottom:0;right:0;
+            padding:14px 16px;
+            font-family:var(--mono);
+            font-size:13.5px;
+            line-height:1.6;
+            white-space:pre;
+            tab-size:4;
+            overflow:hidden;
+            pointer-events:none;
+            color:transparent;
+            z-index:2;
+        }
+        #code-overlay .sq-error{text-decoration:underline wavy var(--err);}
+        #code-overlay .sq-warning{text-decoration:underline wavy var(--warn);}
         #monaco-editor{flex:1;min-height:0;display:none;}
 
         /* ===== 编辑器标签页 ===== */
@@ -559,6 +575,57 @@
             gap:8px;
         }
 
+        /* ---- 代码问题面板 ---- */
+        #problems-content{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+        #problems-toolbar{
+            flex:0 0 auto;
+            display:flex;
+            align-items:center;
+            gap:10px;
+            padding:6px 14px;
+            border-bottom:1px solid var(--line);
+            background:var(--bg-1);
+        }
+        #problems-summary{font-size:12px;color:var(--text-lo);}
+        #problems-list{
+            flex:1;
+            overflow-y:auto;
+            padding:8px 10px;
+        }
+        #problems-empty{
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            justify-content:center;
+            height:100%;
+            color:var(--text-lo);
+            font-size:13px;
+            gap:6px;
+        }
+        .prob-row{
+            display:flex;
+            align-items:flex-start;
+            gap:8px;
+            padding:6px 8px;
+            margin-bottom:3px;
+            border:1px solid var(--line);
+            border-radius:5px;
+            background:var(--bg-0);
+            cursor:pointer;
+            transition:var(--transition);
+        }
+        .prob-row:hover{border-color:var(--brass-dim);background:var(--bg-2);}
+        .prob-sev{flex:0 0 auto;width:18px;text-align:center;font-family:var(--mono);font-weight:700;font-size:11px;padding-top:2px;}
+        .prob-sev.error{color:var(--err);}
+        .prob-sev.warning{color:var(--warn);}
+        .prob-sev.info{color:var(--info);}
+        .prob-sev.hint{color:var(--text-lo);}
+        .prob-body{flex:1;min-width:0;}
+        .prob-msg{font-size:12px;color:var(--text-hi);word-break:break-word;}
+        .prob-loc{font-size:11px;color:var(--text-lo);font-family:var(--mono);margin-top:1px;}
+        .dock-tab .badge.error{background:rgba(248,81,73,.18);color:var(--err);}
+        .dock-tab .badge.warning{background:rgba(210,153,34,.18);color:var(--warn);}
+
         /* ---- 控制台状态徽章 ---- */
         #console-status{padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;}
         .cs-idle{background:rgba(255,255,255,.06);color:var(--text-lo);}
@@ -623,6 +690,7 @@
                 <div id="editor-frame" style="display:flex;">
                     <div id="gutter">1</div>
                     <textarea id="code" spellcheck="false" wrap="off"></textarea>
+                    <div id="code-overlay"></div>
                 </div>
                 <div id="monaco-editor"></div>
             </div>
@@ -633,6 +701,7 @@
                     <span class="dock-grip" id="dock-grip" title="拖动移动窗口(浮动模式)">⠿</span>
                     <button class="dock-tab active" data-tab="console">控制台</button>
                     <button class="dock-tab" data-tab="cph">评测 <span class="badge" id="cph-badge" style="display:none">0/0</span></button>
+                    <button class="dock-tab" data-tab="problems">问题 <span class="badge" id="problems-badge" style="display:none"></span></button>
                     <button class="dock-pin" id="dock-pin" title="切换 浮动/常驻 模式">📍</button>
                     <button class="dock-close" id="dock-close">×</button>
                 </div>
@@ -766,6 +835,7 @@
         const monacoContainer = document.getElementById('monaco-editor');
         const codeEl = document.getElementById('code');
         const gutterEl = document.getElementById('gutter');
+        const codeOverlay = document.getElementById('code-overlay');
         const judgePanel = document.getElementById('pane-cph');
         const judgeVerdict = document.getElementById('cph-verdict');
         const judgeSummary = document.getElementById('cph-summary');
@@ -800,6 +870,7 @@
         const cphSaveAll = document.getElementById('cph-save-all');
         const cphZip = document.getElementById('cph-zip');
         let cphTestCases = []; // CPH 测试点缓存
+        let problemList = [];   // 当前文件代码问题列表
         let activeTab = 'console';
         // Dock 模式: floating(浮动覆盖,可关闭) / permanent(常驻布局,可最小化)
         let dockMode = localStorage.getItem('dock-mode') || 'floating';
@@ -934,11 +1005,28 @@
         socket.on('disconnect', ()=>{ statusText.textContent = '断开连接'; });
         socket.on('connect_error', ()=>{ statusText.textContent = '连接失败'; });
         socket.on('lsp_diagnostics', (data)=>{
-            if(!monacoEditor || data.path !== currentFile) return;
+            if(data.path !== currentFile) return;
+            const diags = data.diagnostics || [];
+            const sevRank = { 1:0, 2:1, 3:2, 4:3 };
+            problemList = diags.map(d => {
+                const s = d.range && d.range.start ? d.range.start : { line: 0, character: 0 };
+                const e = d.range && d.range.end ? d.range.end : s;
+                return {
+                    severity: d.severity ?? 1,
+                    message: d.message || '',
+                    line: (s.line ?? 0) + 1,
+                    column: (s.character ?? 0) + 1,
+                    endLine: (e.line ?? 0) + 1,
+                    endColumn: (e.character ?? 0) + 1,
+                    source: d.source || 'clangd',
+                };
+            }).sort((a,b) => (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9) || a.line - b.line);
+            renderProblems();
+            if(!monacoEditor) return;
             const model = monacoEditor.getModel();
             if(!model) return;
             const sevMap = { 1: monaco.MarkerSeverity.Error, 2: monaco.MarkerSeverity.Warning, 3: monaco.MarkerSeverity.Info, 4: monaco.MarkerSeverity.Hint };
-            const markers = (data.diagnostics || []).map(d => {
+            const markers = diags.map(d => {
                 const s = d.range && d.range.start ? d.range.start : { line: 0, character: 0 };
                 const e = d.range && d.range.end ? d.range.end : { line: 0, character: 0 };
                 return {
@@ -1097,6 +1185,7 @@
             if(currentEditorType === 'textarea'){
                 codeEl.value = content;
                 updateGutter();
+                updateCodeOverlay();
             } else if(monacoEditor){
                 monacoEditor.setValue(content);
             }
@@ -1110,7 +1199,7 @@
             gutterEl.textContent = out;
             gutterEl.scrollTop = codeEl.scrollTop;
         }
-        codeEl.addEventListener('scroll', ()=>{ gutterEl.scrollTop = codeEl.scrollTop; });
+        codeEl.addEventListener('scroll', ()=>{ gutterEl.scrollTop = codeEl.scrollTop; if(codeOverlay){ codeOverlay.scrollTop = codeEl.scrollTop; codeOverlay.scrollLeft = codeEl.scrollLeft; } });
         codeEl.addEventListener('input', ()=>{
             if(applyingRemote || !currentFile) return;
             const newContent = codeEl.value;
@@ -1120,9 +1209,16 @@
             }
             lastContent = newContent;
             updateGutter();
+            updateCodeOverlay();
             markDirty(currentFile);
             clearTimeout(saveTimer);
             saveTimer = setTimeout(()=>saveFile(true), 1500);
+            clearTimeout(lspChangeTimer);
+            lspChangeTimer = setTimeout(()=>{
+                if(currentFile && ['c','cpp','cc','cxx','h','hpp','hh'].includes(extOf(currentFile))){
+                    socket.emit('lsp_change', { path: currentFile, text: codeEl.value });
+                }
+            }, 400);
         });
         codeEl.addEventListener('keydown', function(e){
             if(e.key === 'Tab' && e.shiftKey){
@@ -1888,7 +1984,7 @@
                 if(monacoEditor){ monacoEditor.dispose(); monacoEditor = null; monacoLoaded = false; }
                 monacoContainer.style.display = 'none';
                 editorFrame.style.display = 'flex';
-                if(currentFile){ codeEl.value = fileContentCache[currentFile] || ''; lastContent = codeEl.value; updateGutter(); }
+                if(currentFile){ codeEl.value = fileContentCache[currentFile] || ''; lastContent = codeEl.value; updateGutter(); updateCodeOverlay(); }
             } else {
                 editorFrame.style.display = 'none';
                 monacoContainer.style.display = 'block';
@@ -2144,6 +2240,8 @@
                     filepathEl.textContent = '';
                     btnPanel.disabled = true; btnFre.disabled = true; btnExport.disabled = true; btnBackup.disabled = true;
                     btnRunInConsole.disabled = true;
+                    problemList = [];
+                    renderProblems();
                     renderEditorTabs();
                 }
             } else {
@@ -2183,6 +2281,8 @@
             btnRunInConsole.disabled = false;
             btnSendInput.disabled = true;
             socket.emit('join', { path: path, username: username });
+            problemList = [];
+            renderProblems();
             loadCPH(path);
             renderEditorTabs();
         }
@@ -3050,6 +3150,116 @@
             renderCPH();
         }
 
+        // ===================== 代码问题面板 =====================
+        function renderProblems(){
+            const errors = problemList.filter(p => p.severity === 1).length;
+            const warnings = problemList.filter(p => p.severity === 2).length;
+            const others = problemList.length - errors - warnings;
+            if(problemList.length === 0){
+                problemsSummary.textContent = '';
+                problemsBadge.style.display = 'none';
+                problemsList.innerHTML = `<div id="problems-empty">没有检测到代码问题</div>`;
+                updateCodeOverlay();
+                return;
+            }
+            const parts = [];
+            if(errors) parts.push(errors + ' 个错误');
+            if(warnings) parts.push(warnings + ' 个警告');
+            if(others) parts.push(others + ' 个其他');
+            problemsSummary.textContent = parts.join(' · ');
+            if(errors > 0){
+                problemsBadge.style.display = 'inline-block';
+                problemsBadge.textContent = errors;
+                problemsBadge.className = 'badge error';
+            } else if(warnings > 0){
+                problemsBadge.style.display = 'inline-block';
+                problemsBadge.textContent = warnings;
+                problemsBadge.className = 'badge warning';
+            } else {
+                problemsBadge.style.display = 'inline-block';
+                problemsBadge.textContent = others;
+                problemsBadge.className = 'badge';
+            }
+            const sevLabel = { 1:'E', 2:'W', 3:'I', 4:'H' };
+            const sevClass = { 1:'error', 2:'warning', 3:'info', 4:'hint' };
+            const fileName = currentFile ? currentFile.split('/').pop() : '';
+            problemsList.innerHTML = '';
+            problemList.forEach(p => {
+                const rangeText = (p.endLine && p.endColumn && (p.endLine !== p.line || p.endColumn !== p.column))
+                    ? `${p.line}:${p.column} - ${p.endLine}:${p.endColumn}`
+                    : `${p.line}:${p.column}`;
+                const row = document.createElement('div');
+                row.className = 'prob-row';
+                row.innerHTML = `
+                    <span class="prob-sev ${sevClass[p.severity] || 'hint'}">${sevLabel[p.severity] || 'H'}</span>
+                    <div class="prob-body">
+                        <div class="prob-msg">${escapeHtml(p.message)}</div>
+                        <div class="prob-loc">${escapeHtml(fileName)}:${rangeText}</div>
+                    </div>`;
+                row.addEventListener('click', () => gotoProblem(p));
+                problemsList.appendChild(row);
+            });
+            updateCodeOverlay();
+        }
+        function offsetForPos(text, line, column){
+            const lines = text.split('\n');
+            let offset = 0;
+            for(let i=0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+            return offset + Math.max(0, column - 1);
+        }
+        function updateCodeOverlay(){
+            if(!codeOverlay) return;
+            if(currentEditorType !== 'textarea'){
+                codeOverlay.style.display = 'none';
+                codeOverlay.innerHTML = '';
+                return;
+            }
+            const text = codeEl.value || '';
+            const ranges = [];
+            for(const p of problemList){
+                if(p.severity !== 1 && p.severity !== 2) continue;
+                const s = offsetForPos(text, p.line, p.column);
+                const e = offsetForPos(text, p.endLine || p.line, p.endColumn || p.column);
+                if(e <= s) continue;
+                ranges.push({ s, e, cls: p.severity === 1 ? 'sq-error' : 'sq-warning' });
+            }
+            ranges.sort((a,b) => a.s - b.s);
+            let html = '';
+            let last = 0;
+            const len = text.length;
+            for(const r of ranges){
+                if(r.s < last) continue;
+                const safeStart = Math.max(0, Math.min(r.s, len));
+                const safeEnd = Math.max(safeStart, Math.min(r.e, len));
+                if(safeEnd <= safeStart) continue;
+                html += escapeHtml(text.slice(last, safeStart));
+                html += `<span class="${r.cls}">${escapeHtml(text.slice(safeStart, safeEnd))}</span>`;
+                last = safeEnd;
+            }
+            html += escapeHtml(text.slice(last));
+            codeOverlay.innerHTML = html;
+            codeOverlay.style.display = 'block';
+            codeOverlay.scrollTop = codeEl.scrollTop;
+            codeOverlay.scrollLeft = codeEl.scrollLeft;
+        }
+        function gotoProblem(p){
+            if(!p) return;
+            if(monacoEditor){
+                monacoEditor.revealLineInCenter(p.line);
+                monacoEditor.setPosition({ lineNumber: p.line, column: Math.max(1, p.column) });
+                monacoEditor.focus();
+            } else if(currentEditorType === 'textarea'){
+                const lines = codeEl.value.split('\n');
+                let offset = 0;
+                for(let i=0; i < p.line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+                offset += Math.max(0, p.column - 1);
+                codeEl.focus();
+                codeEl.setSelectionRange(offset, offset);
+                const lineHeight = parseFloat(getComputedStyle(codeEl).lineHeight) || 21;
+                codeEl.scrollTop = Math.max(0, (p.line - 1) * lineHeight);
+            }
+        }
+
         // ===================== 初始化 =====================
         async function init(){
             if(currentEditorType === 'textarea'){
@@ -3065,4 +3275,5 @@
         init();
     </script>
 </body>
+</html>
 </html>

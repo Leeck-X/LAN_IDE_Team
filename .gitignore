@@ -17,6 +17,7 @@ dist/
 *.manifest
 LAN_IDE_Setup.exe
 LAN_IDE.7z
+LAN_IDE.zip
 
 # 系统/编辑器
 .DS_Store

@@ -29,8 +29,12 @@ def app_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 def resource_path(rel: str) -> str:
-    """只读资源目录。PyInstaller 冻结时从 _MEIPASS 解压目录读取模板与静态资源。"""
+    """只读资源目录。PyInstaller 冻结时优先使用 exe 同级目录(结构完整、用户可见)，
+    缺失时回退到 _MEIPASS 解压目录。"""
     if getattr(sys, "frozen", False):
+        base = os.path.join(os.path.dirname(sys.executable), rel)
+        if os.path.exists(base):
+            return base
         return os.path.join(sys._MEIPASS, rel)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
@@ -165,6 +169,37 @@ def strip_freopen_for_judge(source):
     source = re.sub(r'sys\.stdin\s*=\s*open\s*\([^)]*\)', '', source)
     source = re.sub(r'sys\.stdout\s*=\s*open\s*\([^)]*\)', '', source)
     return source
+
+def find_dangerous_call(source):
+    """检测源码中是否包含可能破坏服务器的危险调用, 命中则返回函数名, 否则返回 None。"""
+    patterns = [
+        (r'\bsystem\s*\(', 'system'),
+        (r'\b_?popen\s*\(', 'popen'),
+        (r'\b_?fork\s*\(', 'fork'),
+        (r'\bexecl\s*\(', 'execl'),
+        (r'\bexeclp\s*\(', 'execlp'),
+        (r'\bexecle\s*\(', 'execle'),
+        (r'\bexecv\s*\(', 'execv'),
+        (r'\bexecvp\s*\(', 'execvp'),
+        (r'\bexecvpe\s*\(', 'execvpe'),
+        (r'\bexecve\s*\(', 'execve'),
+        (r'\b_?wsystem\s*\(', '_wsystem'),
+        (r'\bunlink\s*\(', 'unlink'),
+        (r'\bos\.system\s*\(', 'os.system'),
+        (r'\bos\.popen\s*\(', 'os.popen'),
+        (r'\bos\.exec\w*\s*\(', 'os.exec'),
+        (r'\bos\.fork\s*\(', 'os.fork'),
+        (r'\bos\.spawn\w*\s*\(', 'os.spawn'),
+        (r'\bsubprocess\s*\.', 'subprocess'),
+        (r'\bos\.remove\s*\(', 'os.remove'),
+        (r'\bos\.unlink\s*\(', 'os.unlink'),
+        (r'\bos\.rmdir\s*\(', 'os.rmdir'),
+        (r'\bshutil\s*\.', 'shutil'),
+    ]
+    for pattern, name in patterns:
+        if re.search(pattern, source):
+            return name
+    return None
 
 def run_process(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None):
     start = time.perf_counter()
@@ -966,6 +1001,9 @@ def api_test_run():
     with tempfile.TemporaryDirectory() as work_dir:
         with open(full, "r", encoding="utf-8", errors="ignore") as f:
             source = f.read()
+        dangerous = find_dangerous_call(source)
+        if dangerous:
+            return jsonify({"verdict": "RE", "stderr": f"检测到危险函数「{dangerous}」，已阻止评测"})
         stripped = strip_freopen_for_judge(source)
         temp_src = os.path.join(work_dir, os.path.basename(full))
         with open(temp_src, "w", encoding="utf-8") as f:
@@ -1011,6 +1049,11 @@ def api_run():
         return jsonify({"error": "文件不存在"}), 404
     ext = os.path.splitext(path)[1].lstrip(".").lower()
     source_dir = os.path.dirname(full)
+    with open(full, "r", encoding="utf-8", errors="ignore") as f:
+        source = f.read()
+    dangerous = find_dangerous_call(source)
+    if dangerous:
+        return jsonify({"error": f"检测到危险函数调用「{dangerous}」，已阻止运行"}), 200
     if ext == "py":
         return jsonify(run_process([sys.executable, full], stdin_data, cwd=source_dir))
     with tempfile.TemporaryDirectory() as work_dir:
@@ -1045,6 +1088,9 @@ def api_judge():
         # 读取源码并移除 freopen,避免与 stdin 喂入冲突
         with open(full, "r", encoding="utf-8", errors="ignore") as f:
             source = f.read()
+        dangerous = find_dangerous_call(source)
+        if dangerous:
+            return jsonify({"error": f"检测到危险函数「{dangerous}」，已阻止评测"}), 200
         stripped = strip_freopen_for_judge(source)
         temp_src = os.path.join(work_dir, os.path.basename(full))
         with open(temp_src, "w", encoding="utf-8") as f:
@@ -1245,6 +1291,17 @@ def on_run_start(data):
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
+    else:
+        try:
+            with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            content = ""
+    dangerous = find_dangerous_call(content or "")
+    if dangerous:
+        emit("run_output", {"path": rel, "text": f"[安全拦截] 检测到危险函数调用「{dangerous}」，已阻止运行\n"})
+        emit("run_exit", {"path": rel, "code": -1})
+        return
     ext = os.path.splitext(rel)[1].lstrip(".").lower()
     source_dir = os.path.dirname(full)
     work_dir_obj = tempfile.TemporaryDirectory()
