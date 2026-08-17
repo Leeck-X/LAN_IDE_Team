@@ -2,6 +2,7 @@
 workspace/
 __pycache__/
 *.pyc
+.compile_cache/
 
 # 依赖工具(体积大, 用 setup_environment.bat 或官网获取)
 tools/
@@ -9,15 +10,15 @@ static/monaco/
 clangd-windows.zip
 
 # 本地打包成 exe 的工具与产物(仅本地保留, 不上传)
+LAN_IDE_Serve.spec
 LAN_IDE.spec
-make_sfx.bat
-sfx_config.txt
+LAN_IDE_Serve.exe
+LAN_IDE_Serve_Setup.exe
+_internal/
+build_exe.bat
 build/
 dist/
 *.manifest
-LAN_IDE_Setup.exe
-LAN_IDE.7z
-LAN_IDE.zip
 
 # 系统/编辑器
 .DS_Store
