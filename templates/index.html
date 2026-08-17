@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <link rel="apple-touch-icon" href="/static/logo.png">
     <title>LAN C++26 IDE - 实时协同</title>
     <style>
         /* ===== 深色主题 (GitHub Dark) ===== */
@@ -1096,10 +1099,17 @@
         let otBuffer = null;      // 待发送的本地操作(TextOp)
         let otInbox = new Map();  // 版本号 -> {kind:'ack'|'remote', op}
         let otGapTimer = null;
+        let otSynced = false;     // 是否已与服务端权威版本对齐(未对齐时编辑器只读, 防止编辑被 doc_sync 覆盖丢失)
 
+        function updateEditorReadOnly(){
+            const ro = !otSynced;
+            try { if(monacoEditor) monacoEditor.updateOptions({ readOnly: ro }); } catch(e){}
+            try { if(codeEl) codeEl.readOnly = ro; } catch(e){}
+        }
         function otReset(){
-            otRevision = -1; otOutstanding = null; otBuffer = null;
+            otRevision = -1; otOutstanding = null; otBuffer = null; otSynced = false;
             otInbox.clear(); if(otGapTimer){ clearTimeout(otGapTimer); otGapTimer = null; }
+            updateEditorReadOnly();
         }
         function otSend(op){ socket.emit('edit', { path: currentFile, op: op.toJSON(), base: otRevision }, (ack)=>otHandleAck(ack)); }
         function otHandleAck(ack){
@@ -1322,8 +1332,16 @@
         }
 
         // ===================== Socket 事件 =====================
-        socket.on('connect', ()=>{ statusText.textContent = `在线（${username}）`; });
-        socket.on('disconnect', ()=>{ statusText.textContent = '断开连接'; });
+        socket.on('connect', ()=>{
+            statusText.textContent = `在线（${username}）`;
+            // 重连后强制重新对齐权威版本(断线期间的版本号已失效), 否则继续编辑必然 resync 覆盖
+            if(currentFile) resyncDoc();
+        });
+        socket.on('disconnect', ()=>{
+            statusText.textContent = '断开连接';
+            otReset();          // 丢弃未确认的 OT 状态, 编辑器进入只读直到重新同步
+            updateEditorReadOnly();
+        });
         socket.on('connect_error', ()=>{ statusText.textContent = '连接失败'; });
         socket.on('lsp_diagnostics', (data)=>{
             if(data.path !== currentFile) return;
@@ -1397,6 +1415,8 @@
             fileContentCache[data.path] = data.content;
             otReset();
             otRevision = (typeof data.version === 'number') ? data.version : 0;
+            otSynced = true;      // 已对齐权威版本, 解除只读
+            updateEditorReadOnly();
             applyingRemote = true;
             setEditorContent(data.content);
             applyingRemote = false;
@@ -1417,6 +1437,7 @@
             }
         });
         socket.on('saved', (data)=>{ dirtySet.delete(data.path); if(data.path === currentFile) dirty = false; updateTabDirty(data.path); });
+        socket.on('save_error', (data)=>{ showToast('保存失败: ' + (data.error || '未知错误'), 'error', 5000); });
         socket.on('compile_start', (data)=>{
             if(data.path !== currentFile) return;
             consoleStatus.textContent = '编译中...';
@@ -1807,8 +1828,43 @@
                 const CPP_HEADERS = ['algorithm','bits/stdc++.h','bitset','cctype','cmath','cstdio','cstdlib','cstring','deque','functional','iomanip','iostream','limits','list','map','memory','numeric','queue','set','span','sstream','stack','string','tuple','unordered_map','unordered_set','utility','vector'];
                 const CPP_TYPES = ['int','long long','double','float','char','bool','string','vector','pair','map','set','unordered_map','unordered_set','auto','size_t','long double'];
                 const CPP_KEYWORDS = ['const','constexpr','static','typedef','using','namespace','template','typename','struct','class','enum','union','public','private','protected','virtual','override','inline','return','break','continue','if','else','for','while','do','switch','case','default','goto','try','catch','throw','new','delete','sizeof','decltype','auto','void','bool','char','int','long','short','unsigned','signed','float','double','true','false','nullptr','this','explicit','friend','operator','extern','register','volatile','mutable','const_cast','static_cast','dynamic_cast','reinterpret_cast'];
+                // ===================== 已声明变量/函数名提取 =====================
+                // 简单识别 "类型 标识符" 形式, 提供已声明名字的补全
+                const CPP_VAR_TYPES = 'int|long long|long|short|double|float|char|bool|string|vector|map|set|unordered_map|unordered_set|multiset|multimap|queue|stack|deque|pair|tuple|array|bitset|priority_queue|size_t|auto|ll|ull|ld|pii|unsigned|signed|void|list|forward_list';
+                // 排除关键字、STL 函数、保留名等
+                const CPP_RESERVED = new Set([...CPP_KEYWORDS, ...CPP_HEADERS, 'main','std','cin','cout','endl','cerr','clog','printf','scanf','puts','getchar','putchar','getline','sort','reverse','find','count','fill','swap','min','max','abs','pow','sqrt','gcd','lcm','accumulate','lower_bound','upper_bound','binary_search','unique','next_permutation','prev_permutation','memset','memcpy','to_string','stoi','stoll','stol','stod','stof','begin','end','rbegin','rend','size','empty','push_back','pop_back','push_front','pop_front','front','back','top','insert','erase','clear','resize','reserve','first','second','make_pair','make_tuple','get','tie','emplace','emplace_back','emplace_front','data','c_str','substr','find_first_of','find_last_of','npos','ios','sync_with_stdio','cin_tie']);
+                // 预编译正则(避免每次补全都重新构造, 全文扫描时性能明显更好)
+                const DECL_TYPE_RE = new RegExp('\\b(?:' + CPP_VAR_TYPES + ')\\b\\s*(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\\s*(?:&{0,2}|\\*{0,2})\\s*([a-zA-Z_]\\w*)\\s*(?:[;=,\\[\\(])', 'g');
+                const DECL_FUNC_RE = new RegExp('\\b(?:' + CPP_VAR_TYPES + ')\\b\\s*(?:<[^<>]*>)?\\s*(?:&{0,2}|\\*{0,2})\\s*([a-zA-Z_]\\w*)\\s*\\([^)]*\\)\\s*\\{', 'g');
+                const DECL_RANGEFOR_RE = /for\s*\(\s*(?:const\s+)?(?:[a-zA-Z_]\w*\s+)?(?:auto|int|long long|long|short|char|double|float|bool|ll)\s*&?\s*([a-zA-Z_]\w*)\s*:/g;
+                function extractDeclaredNames(text){
+                    const names = new Map();  // name -> kind 文本
+                    DECL_TYPE_RE.lastIndex = 0;
+                    DECL_FUNC_RE.lastIndex = 0;
+                    DECL_RANGEFOR_RE.lastIndex = 0;
+                    let m;
+                    // 类型 + 标识符 (类型可带 <...> 模板参数 和 &, * 修饰)
+                    while ((m = DECL_TYPE_RE.exec(text)) !== null){
+                        const name = m[1];
+                        if (name && !CPP_RESERVED.has(name)){
+                            if (!names.has(name)) names.set(name, 'var');
+                        }
+                    }
+                    // 函数定义: 返回类型 函数名(参数) {  (粗略匹配)
+                    while ((m = DECL_FUNC_RE.exec(text)) !== null){
+                        const name = m[1];
+                        if (name && !CPP_RESERVED.has(name)){
+                            if (!names.has(name)) names.set(name, 'func');
+                        }
+                    }
+                    // 范围 for 变量: for (auto &x : container)
+                    while ((m = DECL_RANGEFOR_RE.exec(text)) !== null){
+                        if (m[1] && !CPP_RESERVED.has(m[1])) names.set(m[1], 'var');
+                    }
+                    return names;
+                }
                 const CPP_PREPROCESS = [
-                    { label: 'include', insertText: 'include <${1:iostream}>' },
+                    { label: 'include', insertText: 'include <iostream>', detail: '改库名请手动选中 iostream 替换' },
                     { label: 'define', insertText: 'define ${1:NAME} ${2:value}' },
                     { label: 'ifdef', insertText: 'ifdef ${1:NAME}' },
                     { label: 'ifndef', insertText: 'ifndef ${1:NAME}' },
@@ -1824,7 +1880,7 @@
                     // 模板
                     { label: 'inc', kind: K.Snippet, insertText: '#include <bits/stdc++.h>\nusing namespace std;\n', detail: '万能头+命名空间', sortText: '0', ctx: 'noinclude' },
                     { label: 'inc_io', kind: K.Snippet, insertText: '#include <iostream>\nusing namespace std;\n', detail: 'iostream+命名空间', sortText: '0', ctx: 'noinclude' },
-                    { label: 'main', kind: K.Snippet, insertText: 'int main() {\n\tios::sync_with_stdio(false);\n\tcin.tie(nullptr);\n\t$0\n\treturn 0;\n}', detail: 'main + fast io', documentation: '快速 I/O 主函数模板', sortText: '0', ctx: 'noinclude' },
+                    { label: 'main', kind: K.Snippet, insertText: 'int main() {\n\tios::sync_with_stdio(false);\n\tcin.tie(nullptr);\n\t$0\n\treturn 0;\n}', detail: 'main + fast io', documentation: '快速 I/O 主函数模板', sortText: '0', ctx: 'noinclude', funcDef: true },
                     { label: 'fastio', kind: K.Snippet, insertText: 'ios::sync_with_stdio(false);\ncin.tie(nullptr);', detail: '快速 I/O', ctx: 'noinclude' },
                     // STL 容器 (使用类型,非 include)
                     { label: 'vector', kind: K.Class, insertText: 'vector<${1:int}> ${2:v};', detail: 'vector', documentation: '动态数组, O(1) 随机访问, O(1) amortized 尾部插入', sortText: '1', ctx: 'noinclude', commitCharacters: ['.', '>'] },
@@ -1896,11 +1952,43 @@
                     { label: 'pii', kind: K.Keyword, insertText: 'typedef pair<int,int> pii;', ctx: 'noinclude' },
                     { label: 'all', kind: K.Keyword, insertText: '#define all(x) x.begin(), x.end()', ctx: 'noinclude' },
                     // BFS / DFS 模板
-                    { label: 'bfs', kind: K.Snippet, insertText: 'auto bfs = [&](int start) {\n\tqueue<int> q;\n\tq.push(start);\n\tvector<bool> vis(n, false);\n\tvis[start] = true;\n\twhile (!q.empty()) {\n\t\tint u = q.front(); q.pop();\n\t\tfor (int v : adj[u]) {\n\t\t\tif (!vis[v]) {\n\t\t\t\tvis[v] = true;\n\t\t\tq.push(v);\n\t\t\t}\n\t\t}\n\t}\n};', detail: 'BFS 模板', ctx: 'noinclude' },
-                    { label: 'dfs', kind: K.Snippet, insertText: 'function<void(int, int)> dfs = [&](int u, int fa) {\n\tfor (int v : adj[u]) {\n\t\tif (v != fa) {\n\t\t\tdfs(v, u);\n\t\t}\n\t}\n};', detail: 'DFS 模板', ctx: 'noinclude' },
-                    { label: 'binary_search_template', kind: K.Snippet, insertText: 'int lo = ${1:0}, hi = ${2:n};\nwhile (lo < hi) {\n\tint mid = lo + (hi - lo) / 2;\n\tif (${3:check(mid)}) hi = mid;\n\telse lo = mid + 1;\n}\n// 答案: lo', detail: '二分模板', ctx: 'noinclude' },
+                    { label: 'bfs', kind: K.Snippet, insertText: 'void bfs(int ${1:start}) {\n\tqueue<int> q;\n\tq.push(${1:start});\n\tvector<bool> vis(n, false);\n\tvis[${1:start}] = true;\n\twhile (!q.empty()) {\n\t\tint u = q.front(); q.pop();\n\t\tfor (int v : adj[u]) {\n\t\t\tif (!vis[v]) {\n\t\t\t\tvis[v] = true;\n\t\t\t\tq.push(v);\n\t\t\t}\n\t\t}\n\t}\n}', detail: 'BFS 模板', ctx: 'noinclude', funcDef: true },
+                    { label: 'dfs', kind: K.Snippet, insertText: 'void dfs(int u, int fa) {\n\tfor (int v : adj[u]) {\n\t\tif (v != fa) {\n\t\t\tdfs(v, u);\n\t\t}\n\t}\n}', detail: 'DFS 模板', ctx: 'noinclude', funcDef: true },
+                    { label: 'binary_search_template', kind: K.Snippet, insertText: 'int lo = ${1:0}, hi = ${2:n};\nwhile (lo < hi) {\n\tint mid = (lo + hi) / 2;\n\tif (${3:check(mid)}) hi = mid;\n\telse lo = mid + 1;\n}\n// 答案: lo', detail: '二分模板', ctx: 'noinclude' },
                     // DSU / 并查集
-                    { label: 'dsu', kind: K.Snippet, insertText: 'vector<int> fa(${1:n});\niota(fa.begin(), fa.end(), 0);\nfunction<int(int)> find = [&](int x) {\n\treturn fa[x] == x ? x : fa[x] = find(fa[x]);\n};\nauto unite = [&](int x, int y) {\n\tfa[find(x)] = find(y);\n};', detail: '并查集(路径压缩)', ctx: 'noinclude' },
+                    { label: 'dsu', kind: K.Snippet, insertText: 'int fa[MAXN];\nint find(int x) {\n\treturn fa[x] == x ? x : fa[x] = find(fa[x]);\n}\nvoid unite(int x, int y) {\n\tfa[find(x)] = find(y);\n}\n// 初始化: for (int i = 0; i <= n; i++) fa[i] = i;', detail: '并查集(路径压缩)', ctx: 'noinclude' },
+                    // 数学 / 数论
+                    { label: 'gcd', kind: K.Snippet, insertText: 'int gcd(int a, int b) {\n\treturn b ? gcd(b, a % b) : a;\n}', detail: 'GCD (递归)', ctx: 'noinclude' },
+                    { label: 'gcd_iter', kind: K.Snippet, insertText: 'int gcd(int a, int b) {\n\twhile (b) {\n\t\ta %= b;\n\t\tswap(a, b);\n\t}\n\treturn a;\n}', detail: 'GCD (迭代)', ctx: 'noinclude' },
+                    { label: 'lcm', kind: K.Snippet, insertText: 'int lcm(int a, int b) {\n\treturn a / gcd(a, b) * b;\n}', detail: 'LCM', ctx: 'noinclude' },
+                    { label: 'qpow', kind: K.Snippet, insertText: 'long long qpow(long long a, long long b, long long mod) {\n\tlong long res = 1;\n\ta %= mod;\n\twhile (b > 0) {\n\t\tif (b & 1) res = res * a % mod;\n\t\ta = a * a % mod;\n\t\tb >>= 1;\n\t}\n\treturn res;\n}', detail: '快速幂 (带取模)', ctx: 'noinclude' },
+                    { label: 'lowbit', kind: K.Snippet, insertText: 'int lowbit(int x) {\n\treturn x & -x;\n}', detail: 'lowbit (返回最低位的1)', ctx: 'noinclude' },
+                    { label: 'exgcd', kind: K.Snippet, insertText: 'long long exgcd(long long a, long long b, long long &x, long long &y) {\n\tif (b == 0) { x = 1; y = 0; return a; }\n\tlong long x1, y1;\n\tlong long d = exgcd(b, a % b, x1, y1);\n\tx = y1;\n\ty = x1 - (a / b) * y1;\n\treturn d;\n}', detail: '扩展欧几里得', ctx: 'noinclude' },
+                    { label: 'is_prime', kind: K.Snippet, insertText: 'bool is_prime(int n) {\n\tif (n < 2) return false;\n\tfor (int i = 2; (long long)i * i <= n; i++) {\n\t\tif (n % i == 0) return false;\n\t}\n\treturn true;\n}', detail: '质数判定', ctx: 'noinclude' },
+                    { label: 'sieve', kind: K.Snippet, insertText: 'bool is_p[MAXN];\nvector<int> primes;\nvoid sieve(int n) {\n\tmemset(is_p, true, sizeof(is_p));\n\tis_p[0] = is_p[1] = false;\n\tfor (int i = 2; i <= n; i++) {\n\t\tif (is_p[i]) {\n\t\t\tprimes.push_back(i);\n\t\t\tfor (long long j = (long long)i * i; j <= n; j += i)\n\t\t\t\tis_p[j] = false;\n\t\t}\n\t}\n}', detail: '埃氏筛', ctx: 'noinclude' },
+                    { label: 'euler_sieve', kind: K.Snippet, insertText: 'bool is_p[MAXN];\nint primes[MAXN], cnt;\nvoid sieve(int n) {\n\tmemset(is_p, true, sizeof(is_p));\n\tis_p[0] = is_p[1] = false;\n\tfor (int i = 2; i <= n; i++) {\n\t\tif (is_p[i]) primes[cnt++] = i;\n\t\tfor (int j = 0; j < cnt && (long long)i * primes[j] <= n; j++) {\n\t\t\tis_p[i * primes[j]] = false;\n\t\t\tif (i % primes[j] == 0) break;\n\t\t}\n\t}\n}', detail: '欧拉线性筛', ctx: 'noinclude' },
+                    { label: 'comb', kind: K.Snippet, insertText: 'long long C[MAXN][MAXN];\nvoid init_comb(int n) {\n\tfor (int i = 0; i <= n; i++) {\n\t\tC[i][0] = 1;\n\t\tfor (int j = 1; j <= i; j++)\n\t\t\tC[i][j] = C[i-1][j-1] + C[i-1][j];\n\t}\n}', detail: '组合数 (杨辉三角)', ctx: 'noinclude' },
+                    // 数据结构
+                    { label: 'bit', kind: K.Snippet, insertText: 'int tree[MAXN];\nvoid update(int i, int v, int n) {\n\tfor (; i <= n; i += i & -i) tree[i] += v;\n}\nint query(int i) {\n\tint s = 0;\n\tfor (; i > 0; i -= i & -i) s += tree[i];\n\treturn s;\n}', detail: '树状数组 (单点更新+前缀和)', ctx: 'noinclude' },
+                    { label: 'segt', kind: K.Snippet, insertText: 'int tree[4 * MAXN], a[MAXN];\nvoid build(int p, int l, int r) {\n\tif (l == r) { tree[p] = a[l]; return; }\n\tint mid = (l + r) / 2;\n\tbuild(2*p, l, mid);\n\tbuild(2*p+1, mid+1, r);\n\ttree[p] = tree[2*p] + tree[2*p+1];\n}\nvoid update(int p, int l, int r, int x, int v) {\n\tif (l == r) { tree[p] = v; return; }\n\tint mid = (l + r) / 2;\n\tif (x <= mid) update(2*p, l, mid, x, v);\n\telse update(2*p+1, mid+1, r, x, v);\n\ttree[p] = tree[2*p] + tree[2*p+1];\n}\nint query(int p, int l, int r, int ql, int qr) {\n\tif (qr < l || r < ql) return 0;\n\tif (ql <= l && r <= qr) return tree[p];\n\tint mid = (l + r) / 2;\n\treturn query(2*p, l, mid, ql, qr) + query(2*p+1, mid+1, r, ql, qr);\n}', detail: '线段树 (区间求和)', ctx: 'noinclude' },
+                    // 图论
+                    { label: 'dijkstra', kind: K.Snippet, insertText: 'struct Edge { int to, w; };\nvector<Edge> adj[MAXN];\nlong long dist[MAXN];\nbool vis[MAXN];\nvoid dijkstra(int s, int n) {\n\tmemset(dist, 0x3f, sizeof(dist));\n\tmemset(vis, false, sizeof(vis));\n\tdist[s] = 0;\n\tpriority_queue<pair<long long,int>, vector<pair<long long,int>>, greater<>> pq;\n\tpq.push({0, s});\n\twhile (!pq.empty()) {\n\t\tauto [d, u] = pq.top(); pq.pop();\n\t\tif (vis[u]) continue;\n\t\tvis[u] = true;\n\t\tfor (auto &e : adj[u]) {\n\t\t\tif (dist[u] + e.w < dist[e.to]) {\n\t\t\t\tdist[e.to] = dist[u] + e.w;\n\t\t\t\tpq.push({dist[e.to], e.to});\n\t\t\t}\n\t\t}\n\t}\n}', detail: 'Dijkstra (堆优化)', ctx: 'noinclude' },
+                    { label: 'floyd', kind: K.Snippet, insertText: 'long long d[MAXN][MAXN];\nvoid floyd(int n) {\n\tfor (int k = 1; k <= n; k++)\n\t\tfor (int i = 1; i <= n; i++)\n\t\t\tfor (int j = 1; j <= n; j++)\n\t\t\t\tif (d[i][k] + d[k][j] < d[i][j])\n\t\t\t\t\td[i][j] = d[i][k] + d[k][j];\n}\n// 初始化: d[i][i]=0; d[i][j]=INF; 读入边 d[u][v]=w;', detail: 'Floyd 全源最短路', ctx: 'noinclude' },
+                    { label: 'topsort', kind: K.Snippet, insertText: 'vector<int> adj[MAXN];\nint in_deg[MAXN];\nbool topsort(int n) {\n\tqueue<int> q;\n\tfor (int i = 1; i <= n; i++) if (in_deg[i] == 0) q.push(i);\n\tint cnt = 0;\n\twhile (!q.empty()) {\n\t\tint u = q.front(); q.pop();\n\t\tcnt++;\n\t\tfor (int v : adj[u]) if (--in_deg[v] == 0) q.push(v);\n\t}\n\treturn cnt == n;\n}', detail: '拓扑排序 (Kahn)', ctx: 'noinclude' },
+                    { label: 'kruskal', kind: K.Snippet, insertText: 'struct Edge { int u, v, w; };\nbool cmp(const Edge &a, const Edge &b) { return a.w < b.w; }\nint fa[MAXN];\nint find(int x) { return fa[x] == x ? x : fa[x] = find(fa[x]); }\nlong long kruskal(int n, vector<Edge>& edges) {\n\tsort(edges.begin(), edges.end(), cmp);\n\tfor (int i = 0; i <= n; i++) fa[i] = i;\n\tlong long sum = 0; int cnt = 0;\n\tfor (auto &e : edges) {\n\t\tint fu = find(e.u), fv = find(e.v);\n\t\tif (fu != fv) { fa[fu] = fv; sum += e.w; cnt++; }\n\t\tif (cnt == n - 1) break;\n\t}\n\treturn sum;\n}', detail: 'Kruskal 最小生成树', ctx: 'noinclude' },
+                    // 字符串
+                    { label: 'kmp', kind: K.Snippet, insertText: 'int nxt[MAXN];\nvoid get_next(const string &p) {\n\tint m = p.size();\n\tnxt[0] = -1;\n\tfor (int i = 0, j = -1; i < m;) {\n\t\tif (j == -1 || p[i] == p[j]) { i++; j++; nxt[i] = j; }\n\t\telse j = nxt[j];\n\t}\n}\nint kmp(const string &s, const string &p) {\n\tget_next(p);\n\tint n = s.size(), m = p.size();\n\tfor (int i = 0, j = 0; i < n;) {\n\t\tif (j == -1 || s[i] == p[j]) { i++; j++; }\n\t\telse j = nxt[j];\n\t\tif (j == m) return i - m;\n\t}\n\treturn -1;\n}', detail: 'KMP 字符串匹配', ctx: 'noinclude' },
+                    { label: 'trie', kind: K.Snippet, insertText: 'int ch[MAXN][26], cnt;\nbool is_end[MAXN];\nvoid insert(const string &s) {\n\tint u = 0;\n\tfor (char c : s) {\n\t\tint v = c - \'a\';\n\t\tif (!ch[u][v]) ch[u][v] = ++cnt;\n\t\tu = ch[u][v];\n\t}\n\tis_end[u] = true;\n}\nbool search(const string &s) {\n\tint u = 0;\n\tfor (char c : s) {\n\t\tint v = c - \'a\';\n\t\tif (!ch[u][v]) return false;\n\t\tu = ch[u][v];\n\t}\n\treturn is_end[u];\n}', detail: 'Trie 字典树', ctx: 'noinclude' },
+                    { label: 'manacher', kind: K.Snippet, insertText: 'int p[MAXN*2];\nstring manacher(const string &s) {\n\tstring t = "#";\n\tfor (char c : s) { t += c; t += \'#\'; }\n\tint n = t.size(), c = 0, r = 0;\n\tfor (int i = 0; i < n; i++) {\n\t\tp[i] = i < r ? min(p[2*c-i], r-i) : 1;\n\t\twhile (i-p[i] >= 0 && i+p[i] < n && t[i-p[i]] == t[i+p[i]]) p[i]++;\n\t\tif (i+p[i] > r) { c = i; r = i+p[i]; }\n\t}\n\treturn t;\n}', detail: 'Manacher 回文串', ctx: 'noinclude' },
+                    // DP 模板
+                    { label: 'knapsack01', kind: K.Snippet, insertText: 'int dp[MAXN];\nfor (int i = 0; i < n; i++) {\n\tfor (int j = W; j >= w[i]; j--) {\n\t\tdp[j] = max(dp[j], dp[j - w[i]] + v[i]);\n\t}\n}\n// 答案: dp[W]', detail: '01 背包', ctx: 'noinclude' },
+                    { label: 'knapsack_full', kind: K.Snippet, insertText: 'int dp[MAXN];\nfor (int i = 0; i < n; i++) {\n\tfor (int j = w[i]; j <= W; j++) {\n\t\tdp[j] = max(dp[j], dp[j - w[i]] + v[i]);\n\t}\n}\n// 答案: dp[W]', detail: '完全背包', ctx: 'noinclude' },
+                    { label: 'lis', kind: K.Snippet, insertText: 'vector<int> dp;\nfor (int i = 0; i < n; i++) {\n\tauto it = lower_bound(dp.begin(), dp.end(), a[i]);\n\tif (it == dp.end()) dp.push_back(a[i]);\n\telse *it = a[i];\n}\n// 答案: dp.size()', detail: 'LIS O(n log n)', ctx: 'noinclude' },
+                    { label: 'lcs', kind: K.Snippet, insertText: 'int dp[MAXN][MAXN];\nfor (int i = 1; i <= n; i++) {\n\tfor (int j = 1; j <= m; j++) {\n\t\tif (a[i-1] == b[j-1]) dp[i][j] = dp[i-1][j-1] + 1;\n\t\telse dp[i][j] = max(dp[i-1][j], dp[i][j-1]);\n\t}\n}\n// 答案: dp[n][m]', detail: 'LCS 最长公共子序列', ctx: 'noinclude' },
+                    // 调试 / 常用宏
+                    { label: 'debug', kind: K.Snippet, insertText: '#define debug(x) cerr << #x << " = " << x << endl', detail: '调试宏', ctx: 'noinclude' },
+                    { label: 'rep_macro', kind: K.Snippet, insertText: '#define rep(i, a, b) for (int i = (a); i < (b); i++)\n#define rep1(i, a, b) for (int i = (a); i <= (b); i++)', detail: 'rep 循环宏', ctx: 'noinclude' },
+                    { label: 'MAXN', kind: K.Snippet, insertText: 'const int MAXN = ${1:100005};\nconst int INF = 0x3f3f3f3f;', detail: 'MAXN / INF 常量', ctx: 'noinclude' },
                 ];
                 monaco.languages.registerCompletionItemProvider('cpp', {
                     triggerCharacters: ['#', '<', '.', '>', ':'],
@@ -1910,15 +1998,29 @@
                         const word = model.getWordUntilPosition(position);
                         const prefix = (word.word || '').toLowerCase();
 
-                        // 上下文1: #include <...> 内部 → 只补头文件名
+                        // 上下文1: #include <...> → 补头文件名 (自动加 > 闭合, 避免回车后位置错乱)
                         const incMatch = textBefore.match(/#\s*include\s*[<"]([^>"\s]*)$/);
                         if (incMatch) {
                             const hdrPrefix = incMatch[1];
+                            // 若已闭合(出现 > 或 "), 不再补全, 避免提示
+                            if (hdrPrefix === '' && /[>"']\s*$/.test(textBefore)) {
+                                return { suggestions: [] };
+                            }
                             const startColumn = position.column - hdrPrefix.length;
                             const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: startColumn, endColumn: position.column };
+                            // 检测光标后是否紧跟 > 或 "(已闭合), 决定是否自动补 >
+                            const afterCursor = lineContent.substring(position.column - 1);
+                            const hasCloseBracket = /^[>"']/.test(afterCursor);
                             return { suggestions: CPP_HEADERS
                                 .filter(h => h.startsWith(hdrPrefix))
-                                .map(h => ({ label: h, kind: K.Module, insertText: h, range: range, detail: 'header', sortText: '0' })) };
+                                .map(h => ({
+                                    label: h,
+                                    kind: K.Module,
+                                    insertText: hasCloseBracket ? h : (h + '>'),
+                                    range: range,
+                                    detail: hasCloseBracket ? 'header' : 'header (auto close >)',
+                                    sortText: '0'
+                                })) };
                         }
 
                         // 上下文2: 模板 <...> 内部 → 补类型名
@@ -1944,6 +2046,9 @@
 
                         // 默认: 关键字 + 代码片段(前缀过滤)
                         const range = mkRange(model, position);
+                        // 检测函数定义式模板(main/bfs/dfs 等)前的返回类型关键字, 避免 "int int main" 或 "void void bfs" 重复
+                        const beforeCursor = lineContent.substring(0, range.startColumn - 1);
+                        const retTypeMatch = beforeCursor.match(/\b(int|signed|void|unsigned|long|short|char|double|float|int32_t|int64_t|size_t|bool|auto)\s+$/);
                         const kwSuggestions = CPP_KEYWORDS
                             .filter(k => !prefix || k.toLowerCase().startsWith(prefix))
                             .map(k => ({ label: k, kind: K.Keyword, insertText: k, range: range, sortText: '2' }));
@@ -1951,14 +2056,39 @@
                             .filter(s => !prefix || (s.label || '').toLowerCase().startsWith(prefix))
                             .map(s => {
                                 const item = Object.assign({}, s, { range: range });
+                                // 函数定义式模板(funcDef): 若前面已写返回类型关键字, 扩展 range 覆盖前缀
+                                // 避免 "int int main"/"void void bfs"/"void void dfs" 等重复
+                                if (s.funcDef && retTypeMatch) {
+                                    item.range = {
+                                        startLineNumber: position.lineNumber,
+                                        endLineNumber: position.lineNumber,
+                                        startColumn: range.startColumn - retTypeMatch[0].length,
+                                        endColumn: range.endColumn
+                                    };
+                                    // 保留默认 label 过滤, 让模板名仍可触发; range 已扩展以覆盖返回类型前缀
+                                }
                                 if (s.insertText && s.insertText.indexOf('${') >= 0) item.insertTextRules = SNIPPET;
                                 if (s.sortText) item.sortText = s.sortText;
-                                if (s.filterText) item.filterText = s.filterText;
                                 if (s.documentation) item.documentation = s.documentation;
                                 if (s.commitCharacters) item.commitCharacters = s.commitCharacters;
                                 return item;
                             });
-                        return { suggestions: snSuggestions.concat(kwSuggestions) };
+                        // 已声明的变量/函数名 — 优先级最高, 方便复用
+                        const declaredNames = extractDeclaredNames(model.getValue());
+                        const varSuggestions = [];
+                        for (const [name, kind] of declaredNames){
+                            if (prefix && !name.toLowerCase().startsWith(prefix)) continue;
+                            // 排除正在输入的当前光标处的同名声明自身
+                            varSuggestions.push({
+                                label: name,
+                                kind: kind === 'func' ? K.Function : K.Variable,
+                                insertText: name,
+                                range: range,
+                                sortText: '0',
+                                detail: kind === 'func' ? '当前文件函数' : '当前文件变量'
+                            });
+                        }
+                        return { suggestions: varSuggestions.concat(snSuggestions).concat(kwSuggestions) };
                     }
                 });
                 // ===================== clangd LSP 语义补全 =====================
@@ -2717,7 +2847,8 @@
         // ===================== freopen 切换 =====================
         // 共享: 在 main 的 { 后插入 freopen, 在 return 0; 前插入 fclose
         function applyFreopen(content, baseName) {
-            const mainMatch = content.match(/(int\s+main\s*\([^)]*\)\s*)\{/);
+            // 识别任意形式的 main 函数: int main(){ / signed main(){ / void main(){ / main(){ 等
+            const mainMatch = content.match(/\bmain\s*\([^)]*\)\s*\{/);
             if (!mainMatch) return null;
             const bracePos = mainMatch.index + mainMatch[0].length;
             const freBlock = '\n    freopen("' + baseName + '.in", "r", stdin);\n' +

@@ -25,3 +25,10 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# 临时调试/生成脚本(不入库)
+gen_logo.py
+_ot_smoke_test.py
+_check_scripts.js
+_verify.js
+*_ot_test.*

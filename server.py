@@ -1016,10 +1016,23 @@ class TextOperation:
                 raise ValueError("incompatible operations")
         return (a_p, b_p)
 
-# ---------- 协同文档权威状态: {path: {"content": str, "version": int, "history": [TextOperation,...]}} ----------
+# ---------- 协同文档权威状态: {path: {"content": str, "version": int, "history": [TextOperation,...], "history_start": int}} ----------
+# history_start: history[0] 之前的版本数(裁剪发生时前移), 用于把全局版本号 base
+# 换算成 history 内的下标: history[i] 产生版本 history_start + i + 1
 docs = {}
 docs_lock = threading.Lock()
 DOC_HISTORY_LIMIT = 2000
+
+def new_doc_state(content=""):
+    return {"content": content, "version": 0, "history": [], "history_start": 0}
+
+def append_history(d, op):
+    """追加一个已应用到 d['content'] 的操作, 并维护 history 裁剪窗口。"""
+    d["history"].append(op)
+    if len(d["history"]) > DOC_HISTORY_LIMIT:
+        cut = len(d["history"]) - DOC_HISTORY_LIMIT
+        d["history"] = d["history"][cut:]
+        d["history_start"] = d.get("history_start", 0) + cut
 
 def get_doc_content(rel):
     """获取权威内容, 若未加载则从磁盘读入。"""
@@ -1029,12 +1042,12 @@ def get_doc_content(rel):
             return d["content"], d["version"]
     try:
         full = safe_path(rel)
-        with open(full, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
+        with open(full, "r", encoding="utf-8", errors="ignore", newline="\n") as f:
+            content = normalize_newlines(f.read())
     except Exception:
         content = ""
     with docs_lock:
-        d = docs.setdefault(rel, {"content": content, "version": 0, "history": []})
+        d = docs.setdefault(rel, new_doc_state(content))
         if d["content"] is None:
             d["content"] = content
         return d["content"], d["version"]
@@ -1205,7 +1218,7 @@ def api_read():
         })
 
     with open(full, "r", encoding="utf-8", errors="ignore", newline="\n") as f:
-        content = f.read()
+        content = normalize_newlines(f.read())
     return jsonify({"binary": False, "content": content})
 
 @app.route("/api/file/raw")
@@ -1233,6 +1246,23 @@ def api_save():
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
+    # 同步 OT 权威缓存: 若该文件已被协同会话加载, 将全文替换作为一个操作追加进历史,
+    # 并广播给房间内客户端, 保证内存/磁盘/客户端三方一致(否则下一次 socket 保存会用旧内存覆盖磁盘)
+    broadcast = None
+    with docs_lock:
+        d = docs.get(path)
+        if d is not None and d.get("content") is not None and d["content"] != content:
+            try:
+                op = TextOperation.from_splice(0, len(d["content"]), content, len(d["content"]))
+            except Exception:
+                op = None
+            if op is not None:
+                d["content"] = content
+                d["version"] += 1
+                append_history(d, op)
+                broadcast = {"path": path, "op": op.to_json(), "version": d["version"]}
+    if broadcast:
+        socketio.emit("edit", broadcast, room=path)
     return jsonify({"ok": True})
 
 @app.route("/api/backup", methods=["POST"])
@@ -1315,6 +1345,10 @@ def api_rename():
     with presence_lock:
         if old in presence:
             presence[new] = presence.pop(old)
+    # 迁移 OT 权威缓存到新路径, 避免旧路径缓存把已改名的文件写回来
+    with docs_lock:
+        if old in docs:
+            docs[new] = docs.pop(old)
     # 先在旧 room 广播,让客户端更新 currentFile 并重新 join 新 room
     socketio.emit("file_renamed", {"old_path": old, "new_path": new}, room=old)
     socketio.emit('tree_changed', {})
@@ -1336,6 +1370,12 @@ def api_delete():
         shutil.rmtree(full)
     else:
         os.remove(full)
+    # 清理 OT 权威缓存(含目录下所有子文件), 否则残留缓存会在保存时重建已删除文件
+    with docs_lock:
+        docs.pop(path, None)
+        prefix = path.rstrip("/") + "/"
+        for k in [k for k in docs if k.startswith(prefix)]:
+            docs.pop(k, None)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True})
 
@@ -1801,6 +1841,7 @@ def on_join(data):
     emit("presence", {"path": rel, "users": users}, room=rel)
     # 推送当前权威内容与版本号, 确保新加入者/重连者立即拿到最新文档, 而不是过时的磁盘快照
     content, version = get_doc_content(rel)
+    print(f"[join] sid={request.sid} path={rel} v={version} len={len(content)}")
     emit("doc_sync", {"path": rel, "content": content, "version": version}, room=request.sid)
 
 @socketio.on("leave")
@@ -1846,6 +1887,7 @@ def on_edit(data):
     rel = data.get("path")
     op_data = data.get("op")
     if not rel or op_data is None:
+        print(f"[edit DEBUG] early return: rel={rel} op_data is None={op_data is None}")
         return {"version": None}
     try:
         base = int(data.get("base")) if data.get("base") is not None else -1
@@ -1853,35 +1895,39 @@ def on_edit(data):
         base = -1
 
     with docs_lock:
-        d = docs.setdefault(rel, {"content": None, "version": 0, "history": []})
+        d = docs.setdefault(rel, new_doc_state(None))
         if d["content"] is None:
             try:
                 full = safe_path(rel)
-                with open(full, "r", encoding="utf-8", errors="ignore") as f:
-                    d["content"] = f.read()
+                with open(full, "r", encoding="utf-8", errors="ignore", newline="\n") as f:
+                    d["content"] = normalize_newlines(f.read())
             except Exception:
                 d["content"] = ""
         content = d["content"]
         version = d["version"]
         history = d["history"]
+        history_start = d.get("history_start", 0)
 
         # 操作格式: 组件数组(新客户端) 或 {start,end,text}(旧客户端兼容)
         clamped = False
         if isinstance(op_data, list):
             try:
                 op = TextOperation.from_json(op_data)
-            except Exception:
+            except Exception as _e:
+                print(f"[edit DEBUG] from_json failed: op_data={op_data} err={_e}")
                 return {"version": None}
         elif isinstance(op_data, dict):
             try:
                 start = int(op_data.get("start", 0))
                 end = int(op_data.get("end", start))
                 text = normalize_newlines(op_data.get("text", ""))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _e:
+                print(f"[edit DEBUG] dict parse failed: err={_e}")
                 return {"version": None}
-            # 依据 base 版本确定替换前的文档长度
-            if 0 <= base < version and base < len(history):
-                doc_len = history[base].base_length
+            # 依据 base 版本确定替换前的文档长度(history 裁剪后需换算下标)
+            idx = base - history_start if base is not None else -1
+            if 0 <= base < version and 0 <= idx < len(history):
+                doc_len = history[idx].base_length
             else:
                 doc_len = len(content)
             if start < 0 or end < start or end > doc_len:
@@ -1890,25 +1936,26 @@ def on_edit(data):
                 end = max(start, min(end, doc_len))
             op = TextOperation.from_splice(start, end, text, doc_len)
         else:
+            print(f"[edit DEBUG] op_data is neither list nor dict: type={type(op_data).__name__}")
             return {"version": None}
 
-        # 变换到当前权威版本(线性历史)
+        # 变换到当前权威版本(线性历史, base 需换算到裁剪窗口内下标)
         if 0 <= base < version:
-            if version - base > len(history):
+            if base < history_start or version - base > len(history):
+                print(f"[edit] resync: base={base} < history_start={history_start} or gap>history (v={version}, h={len(history)})")
                 return {"version": None, "resync": True}
-            for past in history[base:]:
+            for past in history[base - history_start:]:
                 op, _ = TextOperation.transform(op, past)
 
         try:
             new_content = op.apply(content)
-        except ValueError:
+        except ValueError as _ve:
+            print(f"[edit] resync: apply failed op.baseLength={getattr(op, 'base_length', '?')} content.len={len(content)} base={base} version={version} err={_ve}")
             return {"version": None, "resync": True}
 
         d["content"] = new_content
         d["version"] = version + 1
-        d["history"].append(op)
-        if len(d["history"]) > DOC_HISTORY_LIMIT:
-            d["history"] = d["history"][-DOC_HISTORY_LIMIT:]
+        append_history(d, op)
         final_version = d["version"]
         op_json = op.to_json()
 
@@ -1920,7 +1967,15 @@ def on_cursor(data):
     rel = data.get("path")
     if not rel:
         return
+    # 光标偏移量校验: 非法值直接丢弃, 防止接收端 getPositionAt 抛异常
+    try:
+        offset = int(data.get("offset", 0))
+    except (TypeError, ValueError):
+        return
+    if offset < 0:
+        return
     data = dict(data)
+    data["offset"] = offset
     data["sid"] = request.sid
     with presence_lock:
         data["username"] = presence.get(rel, {}).get(request.sid, "匿名")
@@ -1948,8 +2003,10 @@ def on_save(data):
         os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
         with open(full, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[save] 写盘失败 path={rel}: {e}")
+        emit("save_error", {"path": rel, "error": str(e)}, room=request.sid)
+        return
     emit("saved", {"path": rel}, room=rel)
 
 @socketio.on("judge_result")
