@@ -12,6 +12,7 @@ import mimetypes
 import re
 import json
 import zipfile
+import hashlib
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, render_template, send_from_directory
@@ -71,6 +72,29 @@ def get_ip():
         s.close()
     return ip
 
+def ensure_firewall_rule(port=5000, rule_name=None):
+    """尝试放行 Windows 防火墙入站端口, 使局域网内其他设备可访问。
+    需要管理员权限; 失败时仅提示, 不影响启动。"""
+    rule_name = rule_name or f"LAN_IDE {port}"
+    try:
+        proc = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+        )
+        if rule_name in (proc.stdout or ""):
+            print(f"[防火墙] 放行规则已存在: TCP {port}")
+            return
+        subprocess.run(
+            ["netsh", "advfirewall", "firewall", "add", "rule",
+             f"name={rule_name}", "dir=in", "action=allow",
+             "protocol=TCP", f"localport={port}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
+        )
+        print(f"[防火墙] 已添加放行规则: TCP {port}(局域网设备可访问 http://{get_ip()}:{port})")
+    except Exception as e:
+        print(f"[防火墙] 自动配置失败, 请以管理员身份运行一次: netsh advfirewall firewall add rule "
+              f"name=\"{rule_name}\" dir=in action=allow protocol=TCP localport={port}  ({e})")
+
 def is_binary_file(full_path):
     try:
         with open(full_path, 'rb') as f:
@@ -110,7 +134,19 @@ def scan_dir(path=""):
 # ---------- 编译运行 ----------
 COMPILE_TIMEOUT = 20
 RUN_TIMEOUT = 5
-CXX_STDS = ["c++26", "c++23", "c++20", "c++17"]
+# c++17 优先: 与在线 OJ 一致, 编译最快且可生成体积最小的预编译头(PCH); 失败时再向更新标准降级。
+CXX_STDS = ["c++17", "c++20", "c++23", "c++26"]
+# 评测资源限制: 时间(秒)、内存(MB)、输出字节数
+MEM_LIMIT_MB = 256
+OUTPUT_LIMIT = 64 * 1024 * 1024
+
+# 编译产物缓存目录(按源码内容哈希复用, 避免每次点击运行都重新编译)
+COMPILE_CACHE_DIR = os.path.join(BASE_DIR, ".compile_cache")
+os.makedirs(COMPILE_CACHE_DIR, exist_ok=True)
+compile_lock = threading.Lock()
+
+_compiler_cache = {}
+_compiler_cache_lock = threading.Lock()
 
 def find_compiler(lang):
     candidates = {
@@ -123,42 +159,133 @@ def find_compiler(lang):
             return path
     return None
 
+def cached_compiler(lang):
+    """编译器路径结果缓存, 避免每次编译都重复 which 探测。"""
+    with _compiler_cache_lock:
+        if lang not in _compiler_cache:
+            _compiler_cache[lang] = find_compiler(lang)
+        return _compiler_cache[lang]
+
+# ---------- 预编译头(PCH) ----------
+# 将 <bits/stdc++.h> 预编译一次, 让 C++ 编译从约 5s(冷) 降到约 1.5s, 是「秒出答案」的关键。
+PCH_DIR = os.path.join(COMPILE_CACHE_DIR, "pch")
+os.makedirs(PCH_DIR, exist_ok=True)
+PCH_HEADER_CONTENT = "#include <bits/stdc++.h>\n"
+_pch_lock = threading.Lock()
+_pch_generating = set()
+
+def _pch_paths(compiler):
+    key = hashlib.sha256(
+        ((compiler or "") + "|" + PCH_HEADER_CONTENT).encode("utf-8", "ignore")
+    ).hexdigest()
+    hdr = os.path.join(PCH_DIR, key + ".h")
+    return hdr, hdr + ".gch"
+
+def _pch_build(compiler, hdr, gch):
+    tmp_gch = gch + ".tmp"
+    try:
+        proc = subprocess.run(
+            [compiler, "-std=c++17", "-O2", "-x", "c++-header", hdr, "-o", tmp_gch],
+            capture_output=True, timeout=180
+        )
+        if proc.returncode == 0 and os.path.exists(tmp_gch):
+            os.replace(tmp_gch, gch)  # 原子改名: 完整生成后才对编译可见
+    except Exception:
+        pass
+    finally:
+        try:
+            if os.path.exists(tmp_gch):
+                os.unlink(tmp_gch)
+        except Exception:
+            pass
+        with _pch_lock:
+            _pch_generating.discard((hdr, gch))
+
+def ensure_pch(compiler):
+    """PCH 不存在时后台生成; 返回当前是否可用。"""
+    hdr, gch = _pch_paths(compiler)
+    if os.path.exists(gch):
+        return True
+    with _pch_lock:
+        if os.path.exists(gch):
+            return True
+        if (hdr, gch) in _pch_generating:
+            return False
+        _pch_generating.add((hdr, gch))
+    try:
+        with open(hdr, "w", encoding="utf-8") as f:
+            f.write(PCH_HEADER_CONTENT)
+    except Exception:
+        with _pch_lock:
+            _pch_generating.discard((hdr, gch))
+        return False
+    threading.Thread(target=_pch_build, args=(compiler, hdr, gch), daemon=True).start()
+    return False
+
+def warmup_pch():
+    """服务启动后后台预热: 生成 bits/stdc++.h 预编译头, 加速首次点击运行。"""
+    compiler = cached_compiler("cpp")
+    if compiler:
+        ensure_pch(compiler)
+
 def compile_source(src_path, ext, work_dir):
-    exe_name = "main.exe" if platform.system() == "Windows" else "main"
-    exe_path = os.path.join(work_dir, exe_name)
     if ext == "c":
-        compiler = find_compiler("c")
+        compiler = cached_compiler("c")
         if not compiler:
             return None, "未找到 C 编译器，请安装 clang 或 gcc"
         stds = [None]
+        pch_hdr = None
     elif ext in ("cpp", "cc", "cxx"):
-        compiler = find_compiler("cpp")
+        compiler = cached_compiler("cpp")
         if not compiler:
             return None, "未找到 C++ 编译器，请安装 clang++ 或 g++"
         stds = CXX_STDS
+        pch_hdr = _pch_paths(compiler)[0] if ensure_pch(compiler) else None
     else:
         return None, f"不支持的语言: .{ext}"
-    last_err = "编译失败"
-    for i, std in enumerate(stds):
-        cmd = [compiler]
-        if std:
-            cmd.append(f"-std={std}")
-        cmd += ["-O2", "-Wall", "-Wextra", "-o", exe_path, src_path]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            return None, "编译超时"
-        if proc.returncode == 0:
-            return [exe_path], None
-        last_err = proc.stderr or proc.stdout or "编译失败"
-        # 仅当错误与 std 标志相关时才降级重试
-        if std and i < len(stds) - 1:
-            err_lower = last_err.lower()
-            if not any(k in err_lower for k in [
-                "unrecognized", "invalid value", "unknown", "not found",
-                "-std=", "c++26", "c++23", "c++20"
-            ]):
-                break
+
+    # 按「扩展名 + 编译器 + 源码内容」哈希, 命中缓存则跳过编译
+    try:
+        with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
+            src_text = f.read()
+    except Exception:
+        src_text = ""
+    cache_key = hashlib.sha256(
+        (ext + "|" + (compiler or "") + "|" + src_text).encode("utf-8", "ignore")
+    ).hexdigest()
+    cached_exe = os.path.join(COMPILE_CACHE_DIR, cache_key + (".exe" if platform.system() == "Windows" else ""))
+    if os.path.exists(cached_exe):
+        return [cached_exe], None
+
+    with compile_lock:
+        # 双重检查: 并发时可能已被其他线程编译完成
+        if os.path.exists(cached_exe):
+            return [cached_exe], None
+        last_err = "编译失败"
+        for i, s in enumerate(stds):
+            cmd = [compiler]
+            if s:
+                cmd.append(f"-std={s}")
+            # c++17 且 PCH 就绪时用预编译头加速; -pipe 减少磁盘 I/O, 关闭诊断颜色
+            if s == "c++17" and pch_hdr:
+                cmd += ["-include", pch_hdr]
+            cmd += ["-O2", "-pipe", "-fdiagnostics-color=never", "-Wall", "-Wextra", "-o", cached_exe, src_path]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=COMPILE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return None, "编译超时"
+            if proc.returncode == 0:
+                return [cached_exe], None
+            last_err = proc.stderr or proc.stdout or "编译失败"
+            # 仅当错误像「需要更新标准/标准不支持」时才尝试下一个标准, 语法错误不重复编译
+            if s and i < len(stds) - 1:
+                err_lower = last_err.lower()
+                if not any(k in err_lower for k in [
+                    "unrecognized", "invalid value", "unknown", "not found", "-std=",
+                    "is not a member of", "was not declared", "has not been declared",
+                    "no member named", "requires c++", "requires -std",
+                ]):
+                    break
     return None, last_err
 
 def strip_freopen_for_judge(source):
@@ -206,7 +333,7 @@ def run_process(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None):
     try:
         proc = subprocess.run(
             cmd, input=stdin_data, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd
+            encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         return {
@@ -219,21 +346,36 @@ def run_process(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None):
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         return {"error": "TLE", "time_ms": elapsed_ms}
 
-def run_process_with_stats(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None):
-    """运行程序并统计峰值内存(RSS)与墙钟时间。使用 psutil 监控子进程内存。"""
+def run_process_with_stats(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None,
+                           mem_limit_mb=MEM_LIMIT_MB, output_limit=OUTPUT_LIMIT):
+    """运行程序并统计峰值内存(RSS)、墙钟时间与输出大小。
+    超出时间→TLE、内存→MLE、输出→OLE, 否则返回 stdout/stderr/code。"""
     start = time.perf_counter()
-    peak_mem_bytes = 0
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, cwd=cwd
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", cwd=cwd
         )
     except Exception as e:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         return {"error": "RE", "stderr": str(e), "time_ms": elapsed_ms, "mem_kb": 0}
 
-    # 内存监控线程: 轮询进程及其子进程的 RSS 峰值
-    mem_box = {"peak": 0}
+    mem_limit_bytes = mem_limit_mb * 1024 * 1024
+    state = {
+        "peak": 0,
+        "over_mem": False,
+        "over_out": False,
+        "over_time": False,
+        "stdout": "",
+        "stderr": "",
+    }
+
+    def _kill():
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
     def monitor():
         if psutil is None:
             return
@@ -247,41 +389,84 @@ def run_process_with_stats(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None):
                             m = max(m, c.memory_info().rss)
                         except Exception:
                             pass
-                    if m > mem_box["peak"]:
-                        mem_box["peak"] = m
+                    if m > state["peak"]:
+                        state["peak"] = m
+                    if m > mem_limit_bytes:
+                        state["over_mem"] = True
+                        _kill()
+                        break
                 except Exception:
                     pass
-                time.sleep(0.02)
+                time.sleep(0.01)
         except Exception:
             pass
+
+    def reader(stream, key):
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                state[key] += chunk
+                if len(state[key]) > output_limit:
+                    state[key] = state[key][:output_limit]
+                    state["over_out"] = True
+                    _kill()
+                    break
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def writer():
+        try:
+            if stdin_data:
+                proc.stdin.write(stdin_data)
+            proc.stdin.close()
+        except Exception:
+            pass
+
     mt = threading.Thread(target=monitor, daemon=True)
+    t_out = threading.Thread(target=reader, args=(proc.stdout, "stdout"), daemon=True)
+    t_err = threading.Thread(target=reader, args=(proc.stderr, "stderr"), daemon=True)
+    t_in = threading.Thread(target=writer, daemon=True)
     mt.start()
+    t_out.start()
+    t_err.start()
+    t_in.start()
 
     try:
-        stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        state["over_time"] = True
+        _kill()
         try:
-            proc.communicate(timeout=1)
+            proc.wait(timeout=1)
         except Exception:
             pass
-        mt.join(timeout=0.2)
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        return {"error": "TLE", "time_ms": elapsed_ms, "mem_kb": mem_box["peak"] // 1024}
-    except Exception as e:
-        proc.kill()
-        mt.join(timeout=0.2)
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        return {"error": "RE", "stderr": str(e), "time_ms": elapsed_ms, "mem_kb": mem_box["peak"] // 1024}
 
-    mt.join(timeout=0.2)
+    for t in (t_in, t_out, t_err, mt):
+        t.join(timeout=0.5)
+
     elapsed_ms = int((time.perf_counter() - start) * 1000)
+    mem_kb = state["peak"] // 1024
+
+    if state["over_time"]:
+        return {"error": "TLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+    if state["over_mem"]:
+        return {"error": "MLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+    if state["over_out"]:
+        return {"error": "OLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+
     return {
-        "stdout": stdout,
-        "stderr": stderr,
+        "stdout": state["stdout"],
+        "stderr": state["stderr"],
         "code": proc.returncode,
         "time_ms": elapsed_ms,
-        "mem_kb": mem_box["peak"] // 1024
+        "mem_kb": mem_kb,
     }
 
 def get_test_dir(src_full_path):
@@ -315,7 +500,7 @@ def get_system_include_flags():
     try:
         proc = subprocess.run(
             [gpp, "-E", "-x", "c++", "-", "-v"],
-            input="", capture_output=True, text=True, timeout=10
+            input="", capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
         )
         err = proc.stderr or ""
     except Exception:
@@ -597,21 +782,268 @@ clangd.diag_callback = _on_clangd_diagnostics
 presence = {}
 presence_lock = threading.Lock()
 
+# ---------- OT 操作 (移植 ot.js TextOperation) ----------
+class TextOperation:
+    """组件列表表示的操作: 正数=保留(retain)、负数=删除(delete)、字符串=插入(insert)。
+    一个操作可从 base_length 长的文档应用到 target_length 长的文档。"""
+    __slots__ = ("ops", "base_length", "target_length")
+
+    def __init__(self):
+        self.ops = []
+        self.base_length = 0
+        self.target_length = 0
+
+    @staticmethod
+    def _is_retain(op):
+        return isinstance(op, int) and not isinstance(op, bool) and op > 0
+
+    @staticmethod
+    def _is_delete(op):
+        return isinstance(op, int) and not isinstance(op, bool) and op < 0
+
+    @staticmethod
+    def _is_insert(op):
+        return isinstance(op, str)
+
+    def retain(self, n):
+        n = int(n)
+        if n == 0:
+            return self
+        self.base_length += n
+        self.target_length += n
+        if self.ops and self._is_retain(self.ops[-1]):
+            self.ops[-1] += n
+        else:
+            self.ops.append(n)
+        return self
+
+    def insert(self, s):
+        if not isinstance(s, str):
+            raise TypeError("insert expects a string")
+        if s == "":
+            return self
+        self.target_length += len(s)
+        ops = self.ops
+        if ops and self._is_insert(ops[-1]):
+            ops[-1] += s
+        elif ops and self._is_delete(ops[-1]):
+            if len(ops) >= 2 and self._is_insert(ops[-2]):
+                ops[-2] += s
+            else:
+                last = ops[-1]
+                ops[-1] = s
+                ops.append(last)
+        else:
+            ops.append(s)
+        return self
+
+    def delete(self, n):
+        if isinstance(n, str):
+            n = len(n)
+        n = int(n)
+        if n == 0:
+            return self
+        if n > 0:
+            n = -n
+        self.base_length -= n
+        if self.ops and self._is_delete(self.ops[-1]):
+            self.ops[-1] += n
+        else:
+            self.ops.append(n)
+        return self
+
+    def is_noop(self):
+        return not self.ops or (len(self.ops) == 1 and self._is_retain(self.ops[0]))
+
+    def apply(self, text):
+        if len(text) != self.base_length:
+            raise ValueError(f"base length mismatch: {len(text)} != {self.base_length}")
+        out = []
+        i = 0
+        for op in self.ops:
+            if self._is_retain(op):
+                out.append(text[i:i + op])
+                i += op
+            elif self._is_insert(op):
+                out.append(op)
+            else:
+                i += -op
+        if i != len(text):
+            raise ValueError("operation did not consume whole string")
+        return "".join(out)
+
+    def to_json(self):
+        return list(self.ops)
+
+    @classmethod
+    def from_json(cls, ops):
+        op = cls()
+        for o in ops:
+            if isinstance(o, str):
+                op.insert(o)
+            elif isinstance(o, int) and not isinstance(o, bool):
+                if o > 0:
+                    op.retain(o)
+                elif o < 0:
+                    op.delete(o)
+                else:
+                    raise ValueError("zero-length component")
+            else:
+                raise ValueError(f"unknown operation component: {o!r}")
+        return op
+
+    @classmethod
+    def from_splice(cls, start, end, text, doc_len):
+        """由单次替换 {start, end, text} 构造操作(需提供替换前文档长度)。"""
+        op = cls()
+        if start > 0:
+            op.retain(start)
+        d = end - start
+        if d > 0:
+            op.delete(d)
+        if len(text) > 0:
+            op.insert(text)
+        tail = doc_len - end
+        if tail > 0:
+            op.retain(tail)
+        return op
+
+    @staticmethod
+    def transform(a, b):
+        """OT 核心: 对同一基文档的两个并发操作 a、b, 返回 (a', b')。
+        满足 apply(apply(S, a), b') == apply(apply(S, b), a')。
+        当两者在同一位置插入时, 优先保留 a 的插入(即 a 先于 b)。"""
+        if a.base_length != b.base_length:
+            raise ValueError("both operations must have the same base length")
+        a_p = TextOperation()
+        b_p = TextOperation()
+        ops1 = a.ops
+        ops2 = b.ops
+        i1 = 0
+        i2 = 0
+        n1 = len(ops1)
+        n2 = len(ops2)
+
+        def next1():
+            nonlocal i1
+            if i1 >= n1:
+                return None
+            v = ops1[i1]
+            i1 += 1
+            return v
+
+        def next2():
+            nonlocal i2
+            if i2 >= n2:
+                return None
+            v = ops2[i2]
+            i2 += 1
+            return v
+
+        op1 = next1()
+        op2 = next2()
+        while True:
+            if op1 is None and op2 is None:
+                break
+            if isinstance(op1, str):
+                a_p.insert(op1)
+                b_p.retain(len(op1))
+                op1 = next1()
+                continue
+            if isinstance(op2, str):
+                a_p.retain(len(op2))
+                b_p.insert(op2)
+                op2 = next2()
+                continue
+            if op1 is None:
+                raise ValueError("first operation too short")
+            if op2 is None:
+                raise ValueError("first operation too long")
+            if TextOperation._is_retain(op1) and TextOperation._is_retain(op2):
+                if op1 > op2:
+                    minl = op2
+                    op1 = op1 - op2
+                    op2 = next2()
+                elif op1 == op2:
+                    minl = op2
+                    op1 = next1()
+                    op2 = next2()
+                else:
+                    minl = op1
+                    op2 = op2 - op1
+                    op1 = next1()
+                a_p.retain(minl)
+                b_p.retain(minl)
+            elif TextOperation._is_delete(op1) and TextOperation._is_delete(op2):
+                if -op1 > -op2:
+                    op1 = op1 - op2
+                    op2 = next2()
+                elif op1 == op2:
+                    op1 = next1()
+                    op2 = next2()
+                else:
+                    op2 = op2 - op1
+                    op1 = next1()
+            elif TextOperation._is_delete(op1) and TextOperation._is_retain(op2):
+                if -op1 > op2:
+                    minl = op2
+                    op1 = op1 + op2
+                    op2 = next2()
+                elif -op1 == op2:
+                    minl = op2
+                    op1 = next1()
+                    op2 = next2()
+                else:
+                    minl = -op1
+                    op2 = op2 + op1
+                    op1 = next1()
+                a_p.delete(minl)
+            elif TextOperation._is_retain(op1) and TextOperation._is_delete(op2):
+                if op1 > -op2:
+                    minl = -op2
+                    op1 = op1 + op2
+                    op2 = next2()
+                elif op1 == -op2:
+                    minl = op1
+                    op1 = next1()
+                    op2 = next2()
+                else:
+                    minl = op1
+                    op2 = op2 + op1
+                    op1 = next1()
+                b_p.delete(minl)
+            else:
+                raise ValueError("incompatible operations")
+        return (a_p, b_p)
+
+# ---------- 协同文档权威状态: {path: {"content": str, "version": int, "history": [TextOperation,...]}} ----------
+docs = {}
+docs_lock = threading.Lock()
+DOC_HISTORY_LIMIT = 2000
+
+def get_doc_content(rel):
+    """获取权威内容, 若未加载则从磁盘读入。"""
+    with docs_lock:
+        d = docs.get(rel)
+        if d is not None and d.get("content") is not None:
+            return d["content"], d["version"]
+    try:
+        full = safe_path(rel)
+        with open(full, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        content = ""
+    with docs_lock:
+        d = docs.setdefault(rel, {"content": content, "version": 0, "history": []})
+        if d["content"] is None:
+            d["content"] = content
+        return d["content"], d["version"]
+
 # ---------- 交互式运行 ----------
 RUN_MAX_SECONDS = 300
+CONSOLE_RUN_TIMEOUT = 4  # 控制台「运行」的时间上限(秒), 超时判 TLE
 running_consoles = {}
 running_consoles_lock = threading.Lock()
-
-def console_reader(sid, proc, path):
-    try:
-        for line in iter(proc.stdout.readline, ""):
-            socketio.emit("run_output", {"path": path, "text": line}, room=sid)
-    except:
-        pass
-    finally:
-        rc = proc.wait()
-        socketio.emit("run_exit", {"path": path, "code": rc}, room=sid)
-        cleanup_console(sid)
 
 def cleanup_console(sid):
     with running_consoles_lock:
@@ -630,6 +1062,119 @@ def kill_console(sid):
             entry["proc"].kill()
         except:
             pass
+
+def run_process_streaming(cmd, stdin_data="", timeout=CONSOLE_RUN_TIMEOUT, cwd=None,
+                          mem_limit_mb=MEM_LIMIT_MB, output_limit=OUTPUT_LIMIT,
+                          on_output=None, on_proc=None):
+    """流式运行程序: 每读到一块输出立即回调 on_output, 同时统计峰值内存/时间/输出大小。
+    超出时间→TLE、内存→MLE、输出→OLE。stdin 喂入后立即关闭(EOF), 与 OJ 行为一致。
+    on_proc(proc) 在进程启动成功后回调一次(用于外部停止)。"""
+    start = time.perf_counter()
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", cwd=cwd
+        )
+    except Exception as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {"error": "RE", "stderr": str(e), "time_ms": elapsed_ms, "mem_kb": 0}
+    if on_proc:
+        try:
+            on_proc(proc)
+        except Exception:
+            pass
+
+    mem_limit_bytes = mem_limit_mb * 1024 * 1024
+    state = {"peak": 0, "over_mem": False, "over_out": False, "over_time": False, "out_size": 0}
+
+    def _kill():
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def monitor():
+        if psutil is None:
+            return
+        try:
+            p = psutil.Process(proc.pid)
+            while proc.poll() is None:
+                try:
+                    m = p.memory_info().rss
+                    for c in p.children(recursive=True):
+                        try:
+                            m = max(m, c.memory_info().rss)
+                        except Exception:
+                            pass
+                    if m > state["peak"]:
+                        state["peak"] = m
+                    if m > mem_limit_bytes:
+                        state["over_mem"] = True
+                        _kill()
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.01)
+        except Exception:
+            pass
+
+    def writer():
+        try:
+            if stdin_data:
+                proc.stdin.write(stdin_data)
+            proc.stdin.close()
+        except Exception:
+            pass
+
+    def reader():
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                if on_output:
+                    try:
+                        on_output(chunk)
+                    except Exception:
+                        pass
+                state["out_size"] += len(chunk)
+                if state["out_size"] > output_limit:
+                    state["over_out"] = True
+                    _kill()
+                    break
+        except Exception:
+            pass
+
+    mt = threading.Thread(target=monitor, daemon=True)
+    rt = threading.Thread(target=reader, daemon=True)
+    wt = threading.Thread(target=writer, daemon=True)
+    mt.start()
+    rt.start()
+    wt.start()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        state["over_time"] = True
+        _kill()
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+
+    for t in (wt, rt, mt):
+        t.join(timeout=0.5)
+
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    mem_kb = state["peak"] // 1024
+
+    if state["over_time"]:
+        return {"error": "TLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+    if state["over_mem"]:
+        return {"error": "MLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+    if state["over_out"]:
+        return {"error": "OLE", "time_ms": elapsed_ms, "mem_kb": mem_kb}
+    return {"stdout": "", "stderr": "", "code": proc.returncode, "time_ms": elapsed_ms, "mem_kb": mem_kb}
 
 # ---------- HTTP 路由 ----------
 @app.route("/")
@@ -823,12 +1368,21 @@ def api_upload_tests():
         return jsonify({"error": "源文件不存在"}), 400
     test_dir = get_test_dir(src_full)
     os.makedirs(test_dir, exist_ok=True)
+    # 记录导入前已存在的编号，避免同名测试点被静默覆盖/丢失
+    existing_nums = set()
+    for f in os.listdir(test_dir):
+        m = re.match(r'^(\d+)\.(in|out)$', f)
+        if m:
+            existing_nums.add(m.group(1))
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         file.save(tmp.name)
         tmp_path = tmp.name
     count = 0
     try:
         with zipfile.ZipFile(tmp_path, 'r') as zf:
+            # 先解析出 zip 内所有 (编号 -> {in, out}) 的映射，成对处理，
+            # 避免只命中一半(比如只有 .in 没有 .out)时错位改号
+            pairs = {}
             for name in zf.namelist():
                 if name.endswith('/') or name.startswith('.'):
                     continue
@@ -842,13 +1396,31 @@ def api_upload_tests():
                 m = re.match(r'^(?:.*?\.)*?(\d+)\.(in|out)$', low)
                 if not m:
                     continue
-                num = m.group(1)
-                ext = m.group(2)
-                new_name = f"{num}.{ext}"
-                dest = os.path.join(test_dir, new_name)
-                with zf.open(name) as src, open(dest, 'wb') as dst:
-                    dst.write(src.read())
-                count += 1
+                num, ext = m.group(1), m.group(2)
+                pairs.setdefault(num, {})[ext] = name
+
+            # 编号重映射：如果 zip 里的编号与工作区已有的测试点冲突，
+            # 分配一个新的、当前不存在的编号，而不是覆盖原有测试点
+            used_nums = set(existing_nums)
+            remap = {}
+            for num in sorted(pairs.keys(), key=lambda x: int(x)):
+                if num not in used_nums:
+                    remap[num] = num
+                    used_nums.add(num)
+                else:
+                    n = 1
+                    while str(n) in used_nums:
+                        n += 1
+                    remap[num] = str(n)
+                    used_nums.add(str(n))
+
+            for num, files in pairs.items():
+                new_num = remap[num]
+                for ext, name in files.items():
+                    dest = os.path.join(test_dir, f"{new_num}.{ext}")
+                    with zf.open(name) as src, open(dest, 'wb') as dst:
+                        dst.write(src.read())
+                    count += 1
     except zipfile.BadZipFile:
         return jsonify({"error": "无效的 zip 文件"}), 400
     finally:
@@ -977,6 +1549,78 @@ def api_test_add():
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True, "num": n})
 
+@app.route("/api/test/import", methods=["POST"])
+def api_test_import():
+    """从另一个源文件的测试点导入到当前文件, 编号冲突时自动重映射(不覆盖原有测试点)。"""
+    data = request.get_json(force=True)
+    source = data.get("source", "")
+    target = data.get("target", "")
+    nums = data.get("nums")
+    try:
+        src_full = safe_path(source) if source else None
+        dst_full = safe_path(target) if target else None
+    except ValueError:
+        return jsonify({"error": "非法路径"}), 400
+    if not src_full or not os.path.isfile(src_full):
+        return jsonify({"error": "源文件不存在"}), 400
+    if not dst_full or not os.path.isfile(dst_full):
+        return jsonify({"error": "目标文件不存在"}), 400
+    src_test_dir = get_test_dir(src_full)
+    dst_test_dir = get_test_dir(dst_full)
+    if not os.path.isdir(src_test_dir):
+        return jsonify({"error": "源文件没有测试点"}), 400
+    os.makedirs(dst_test_dir, exist_ok=True)
+
+    # 解析源文件测试点: {num: {"in": path, "out": path}}, 只保留 in/out 成对的
+    src_tests = {}
+    for f in sorted(os.listdir(src_test_dir)):
+        m = re.match(r"^(\d+)\.(in|out)$", f)
+        if m:
+            num, ext = m.group(1), m.group(2)
+            src_tests.setdefault(num, {})[ext] = os.path.join(src_test_dir, f)
+    valid = {n: p for n, p in src_tests.items() if p.get("in") and p.get("out")}
+
+    selected = set()
+    if nums:
+        for n in nums:
+            n = str(n)
+            if n in valid:
+                selected.add(n)
+    else:
+        selected = set(valid.keys())
+    if not selected:
+        return jsonify({"error": "没有可导入的测试点"}), 400
+
+    existing_nums = set()
+    for f in os.listdir(dst_test_dir):
+        m = re.match(r"^(\d+)\.(in|out)$", f)
+        if m:
+            existing_nums.add(m.group(1))
+
+    # 编号冲突时分配新的、不存在的编号, 而非覆盖原有测试点
+    used = set(existing_nums)
+    mapping = {}
+    for num in sorted(selected, key=lambda x: int(x)):
+        if num not in used:
+            mapping[num] = num
+            used.add(num)
+        else:
+            n = 1
+            while str(n) in used:
+                n += 1
+            mapping[num] = str(n)
+            used.add(str(n))
+
+    count = 0
+    for num, new_num in mapping.items():
+        for ext in ("in", "out"):
+            with open(valid[num][ext], "rb") as s, open(os.path.join(dst_test_dir, f"{new_num}.{ext}"), "wb") as d:
+                d.write(s.read())
+            count += 1
+
+    socketio.emit('tree_changed', {})
+    return jsonify({"ok": True, "count": count, "mapping": mapping})
+
 @app.route("/api/test/run", methods=["POST"])
 def api_test_run():
     data = request.get_json(force=True)
@@ -1063,8 +1707,10 @@ def api_run():
         return jsonify(run_process(run_cmd, stdin_data, cwd=source_dir))
 
 def verdict_from_result(result, expected):
-    if result.get("error"):
-        return "TLE"
+    err = result.get("error")
+    if err:
+        # 运行期错误: TLE / MLE / OLE 由 error 字段直接给出
+        return err if err in ("TLE", "MLE", "OLE") else "RE"
     if result["code"] != 0:
         return "RE"
     if result["stdout"].strip() == expected.strip():
@@ -1083,7 +1729,7 @@ def api_judge():
     if not tests:
         return jsonify({"error": "未找到测试数据，请上传 .in/.out 文件"}), 200
     ext = os.path.splitext(path)[1].lstrip(".").lower()
-    rank = {"AC": 0, "WA": 1, "RE": 2, "TLE": 3}
+    rank = {"AC": 0, "WA": 1, "RE": 2, "TLE": 3, "MLE": 3, "OLE": 3}
     with tempfile.TemporaryDirectory() as work_dir:
         # 读取源码并移除 freopen,避免与 stdin 喂入冲突
         with open(full, "r", encoding="utf-8", errors="ignore") as f:
@@ -1153,6 +1799,9 @@ def on_join(data):
         presence.setdefault(rel, {})[request.sid] = username
         users = list(presence[rel].values())
     emit("presence", {"path": rel, "users": users}, room=rel)
+    # 推送当前权威内容与版本号, 确保新加入者/重连者立即拿到最新文档, 而不是过时的磁盘快照
+    content, version = get_doc_content(rel)
+    emit("doc_sync", {"path": rel, "content": content, "version": version}, room=request.sid)
 
 @socketio.on("leave")
 def on_leave(data):
@@ -1164,8 +1813,22 @@ def on_leave(data):
         if rel in presence and request.sid in presence[rel]:
             del presence[rel][request.sid]
             users = list(presence[rel].values())
+            empty = not presence[rel]
         else:
             users = []
+            empty = False
+    if empty:
+        with docs_lock:
+            d = docs.pop(rel, None)
+        # 最后一个用户离开时, 把权威内容落盘, 保证磁盘始终是最新的
+        if d is not None and d.get("content") is not None:
+            try:
+                full = safe_path(rel)
+                os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
+                with open(full, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(d["content"])
+            except Exception:
+                pass
     emit("presence", {"path": rel, "users": users}, room=rel)
 
 @socketio.on("disconnect")
@@ -1181,33 +1844,113 @@ def on_disconnect():
 @socketio.on("edit")
 def on_edit(data):
     rel = data.get("path")
-    if not rel:
-        return
-    if "content" in data:
-        data["content"] = normalize_newlines(data["content"])
-    emit("edit", data, room=rel, include_self=False)
+    op_data = data.get("op")
+    if not rel or op_data is None:
+        return {"version": None}
+    try:
+        base = int(data.get("base")) if data.get("base") is not None else -1
+    except (TypeError, ValueError):
+        base = -1
+
+    with docs_lock:
+        d = docs.setdefault(rel, {"content": None, "version": 0, "history": []})
+        if d["content"] is None:
+            try:
+                full = safe_path(rel)
+                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                    d["content"] = f.read()
+            except Exception:
+                d["content"] = ""
+        content = d["content"]
+        version = d["version"]
+        history = d["history"]
+
+        # 操作格式: 组件数组(新客户端) 或 {start,end,text}(旧客户端兼容)
+        clamped = False
+        if isinstance(op_data, list):
+            try:
+                op = TextOperation.from_json(op_data)
+            except Exception:
+                return {"version": None}
+        elif isinstance(op_data, dict):
+            try:
+                start = int(op_data.get("start", 0))
+                end = int(op_data.get("end", start))
+                text = normalize_newlines(op_data.get("text", ""))
+            except (TypeError, ValueError):
+                return {"version": None}
+            # 依据 base 版本确定替换前的文档长度
+            if 0 <= base < version and base < len(history):
+                doc_len = history[base].base_length
+            else:
+                doc_len = len(content)
+            if start < 0 or end < start or end > doc_len:
+                clamped = True
+                start = max(0, min(start, doc_len))
+                end = max(start, min(end, doc_len))
+            op = TextOperation.from_splice(start, end, text, doc_len)
+        else:
+            return {"version": None}
+
+        # 变换到当前权威版本(线性历史)
+        if 0 <= base < version:
+            if version - base > len(history):
+                return {"version": None, "resync": True}
+            for past in history[base:]:
+                op, _ = TextOperation.transform(op, past)
+
+        try:
+            new_content = op.apply(content)
+        except ValueError:
+            return {"version": None, "resync": True}
+
+        d["content"] = new_content
+        d["version"] = version + 1
+        d["history"].append(op)
+        if len(d["history"]) > DOC_HISTORY_LIMIT:
+            d["history"] = d["history"][-DOC_HISTORY_LIMIT:]
+        final_version = d["version"]
+        op_json = op.to_json()
+
+    emit("edit", {"path": rel, "op": op_json, "version": final_version}, room=rel, include_self=False)
+    return {"version": final_version, "op": op_json, "clamped": clamped, "resync": False}
 
 @socketio.on("cursor")
 def on_cursor(data):
     rel = data.get("path")
     if not rel:
         return
+    data = dict(data)
+    data["sid"] = request.sid
+    with presence_lock:
+        data["username"] = presence.get(rel, {}).get(request.sid, "匿名")
     emit("cursor", data, room=rel, include_self=False)
 
 @socketio.on("save")
 def on_save(data):
+    """持久化: 优先写入 OT 权威内容; 权威已卸载时用客户端带来的内容兜底。
+    不重置版本号/历史(协同状态保持连续)。"""
     rel = data.get("path")
     if not rel:
         return
-    content = data.get("content", "")
-    content = normalize_newlines(content)
     try:
         full = safe_path(rel)
+    except ValueError:
+        return
+    client_content = normalize_newlines(data.get("content", "") or "")
+    with docs_lock:
+        d = docs.get(rel)
+        if d is not None and d.get("content") is not None:
+            content = d["content"]
+        else:
+            content = client_content
+    try:
+        os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
         with open(full, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
-        emit("saved", {"path": rel}, room=rel)
-    except ValueError:
+    except Exception:
         pass
+    emit("saved", {"path": rel}, room=rel)
 
 @socketio.on("judge_result")
 def on_judge_result(data):
@@ -1275,9 +2018,11 @@ def on_lsp_completion(data):
 
 @socketio.on("run_start")
 def on_run_start(data):
+    """OJ 式一次性运行: 先输入(stdin)→编译→运行→流式输出, 超时/超内存/超输出给出 TLE/MLE/OLE。"""
     sid = request.sid
     rel = data.get("path", "")
     content = data.get("content")
+    stdin_data = normalize_newlines(data.get("stdin", "") or "")
     kill_console(sid)
     cleanup_console(sid)
     try:
@@ -1288,7 +2033,7 @@ def on_run_start(data):
         return
     if content is not None:
         content = normalize_newlines(content)
-        os.makedirs(os.path.dirname(full), exist_ok=True)
+        os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
         with open(full, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
     else:
@@ -1300,17 +2045,18 @@ def on_run_start(data):
     dangerous = find_dangerous_call(content or "")
     if dangerous:
         emit("run_output", {"path": rel, "text": f"[安全拦截] 检测到危险函数调用「{dangerous}」，已阻止运行\n"})
-        emit("run_exit", {"path": rel, "code": -1})
+        emit("run_exit", {"path": rel, "code": -1, "reason": "blocked"})
         return
     ext = os.path.splitext(rel)[1].lstrip(".").lower()
     source_dir = os.path.dirname(full)
     work_dir_obj = tempfile.TemporaryDirectory()
     work_dir = work_dir_obj.name
     if ext in ("c", "cpp", "cc", "cxx"):
+        emit("compile_start", {"path": rel})
         run_cmd, err = compile_source(full, ext, work_dir)
         if err:
             emit("run_output", {"path": rel, "text": err + "\n"})
-            emit("run_exit", {"path": rel, "code": -1})
+            emit("run_exit", {"path": rel, "code": -1, "reason": "compile_error"})
             work_dir_obj.cleanup()
             return
     elif ext == "py":
@@ -1320,25 +2066,33 @@ def on_run_start(data):
         emit("run_exit", {"path": rel, "code": -1})
         work_dir_obj.cleanup()
         return
-    try:
-        # cwd 设为源文件目录,使 freopen 相对路径能找到 .in/.out
-        proc = subprocess.Popen(
-            run_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=source_dir
+
+    verdict_text = {"TLE": "时间超限", "MLE": "内存超限", "OLE": "输出超限", "RE": "运行时错误"}
+
+    def runner():
+        def on_proc(proc):
+            with running_consoles_lock:
+                running_consoles[sid] = {"proc": proc, "workdir": work_dir_obj, "timer": None, "path": rel}
+            socketio.emit("run_started", {"path": rel}, room=sid)
+
+        def on_output(chunk):
+            socketio.emit("run_output", {"path": rel, "text": chunk}, room=sid)
+
+        result = run_process_streaming(
+            run_cmd, stdin_data, timeout=CONSOLE_RUN_TIMEOUT, cwd=source_dir,
+            mem_limit_mb=MEM_LIMIT_MB, output_limit=OUTPUT_LIMIT,
+            on_output=on_output, on_proc=on_proc
         )
-    except Exception as e:
-        emit("run_output", {"path": rel, "text": f"[错误] 启动失败: {e}\n"})
-        emit("run_exit", {"path": rel, "code": -1})
-        work_dir_obj.cleanup()
-        return
-    timer = threading.Timer(RUN_MAX_SECONDS, kill_console, args=(sid,))
-    timer.daemon = True
-    timer.start()
-    with running_consoles_lock:
-        running_consoles[sid] = {"proc": proc, "workdir": work_dir_obj, "timer": timer, "path": rel}
-    # 通知客户端进程已启动，可发送初始输入
-    emit("run_started", {"path": rel}, room=sid)
-    threading.Thread(target=console_reader, args=(sid, proc, rel), daemon=True).start()
+        verdict = result.get("error")
+        if verdict:
+            reason = verdict_text.get(verdict, verdict)
+            socketio.emit("run_output", {"path": rel, "text": f"\n[{verdict}] {reason}（{result.get('time_ms', 0)}ms / {result.get('mem_kb', 0)}KB）\n"}, room=sid)
+        code = result.get("code") if result.get("code") is not None else -1
+        socketio.emit("run_exit", {"path": rel, "code": code, "verdict": verdict,
+                                   "time_ms": result.get("time_ms", 0), "mem_kb": result.get("mem_kb", 0)}, room=sid)
+        cleanup_console(sid)
+
+    threading.Thread(target=runner, daemon=True).start()
 
 @socketio.on("run_input")
 def on_run_input(data):
@@ -1364,4 +2118,8 @@ if __name__ == "__main__":
     print(f"\n  LAN C++26 IDE")
     print(f"  本机: http://localhost:5000")
     print(f"  局域网: http://{ip}:5000\n")
+    # 后台预热编译环境(探测编译器/标准 + 生成 bits/stdc++.h 预编译头), 加速首次点击运行
+    threading.Thread(target=warmup_pch, daemon=True).start()
+    # 后台放行防火墙端口, 保证局域网其他设备可访问(需管理员权限, 失败不影响启动)
+    threading.Thread(target=ensure_firewall_rule, daemon=True).start()
     socketio.run(app, host="0.0.0.0", port=5000, debug=False)
