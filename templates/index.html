@@ -225,6 +225,11 @@
         #code-overlay .sq-warning{text-decoration:underline wavy var(--warn);}
         #monaco-editor{flex:1;min-height:0;display:none;}
 
+        /* 协作者光标 */
+        .remote-cursor{position:relative;height:0;border-left:2px solid #888;margin-left:-1px;}
+        .remote-cursor-name{position:absolute;top:-16px;left:0;font-size:10px;line-height:1;color:#fff;padding:1px 4px;border-radius:3px;white-space:nowrap;font-family:var(--sans);}
+        .gutter-cursor{display:inline-block;width:6px;height:6px;border-radius:50%;margin-left:2px;vertical-align:middle;}
+
         /* ===== 编辑器标签页 ===== */
         #editor-tabs-wrap{
             flex:0 0 auto;
@@ -460,11 +465,12 @@
         #cph-list{
             flex:1;
             overflow-y:auto;
+            overflow-x:hidden;
             padding:8px 10px;
         }
         .tc-row{
             display:grid;
-            grid-template-columns:36px 1fr 1fr 70px 64px 60px;
+            grid-template-columns:32px minmax(0,1fr) minmax(0,1fr) auto auto auto;
             gap:6px;
             align-items:start;
             padding:6px 8px;
@@ -472,6 +478,7 @@
             border:1px solid var(--line);
             border-radius:5px;
             background:var(--bg-0);
+            min-width:0;
         }
         .tc-row .tc-num{
             font-size:12px;
@@ -479,11 +486,13 @@
             color:var(--text-lo);
             text-align:center;
             padding-top:4px;
+            min-width:0;
         }
         .tc-row .tc-io{
             display:flex;
             flex-direction:column;
             gap:2px;
+            min-width:0;
         }
         .tc-row .tc-io label{
             font-size:9.5px;
@@ -503,6 +512,8 @@
             max-height:100px;
             resize:vertical;
             width:100%;
+            min-width:0;
+            max-width:100%;
             line-height:1.4;
         }
         .tc-row textarea:focus{border-color:var(--accent,#5b9bf5);outline:none;}
@@ -516,9 +527,11 @@
             font-size:11px;
             font-weight:700;
             text-align:center;
-            padding:4px 0;
+            padding:4px 6px;
             border-radius:3px;
             min-height:22px;
+            white-space:nowrap;
+            min-width:0;
         }
         .tc-row .tc-time{
             font-size:11px;
@@ -529,6 +542,8 @@
             flex-direction:column;
             align-items:center;
             gap:1px;
+            white-space:nowrap;
+            min-width:0;
         }
         .tc-row .tc-mem{
             font-size:10px;
@@ -538,8 +553,9 @@
         .tc-row .tc-actions{
             display:flex;
             gap:4px;
-            justify-content:center;
+            justify-content:flex-start;
             padding-top:2px;
+            min-width:0;
         }
         .tc-row .tc-actions button{
             background:none;
@@ -629,7 +645,9 @@
         /* ---- 控制台状态徽章 ---- */
         #console-status{padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;}
         .cs-idle{background:rgba(255,255,255,.06);color:var(--text-lo);}
+        .cs-compiling{background:rgba(212,162,74,.15);color:var(--brass);}
         .cs-running{background:rgba(88,166,255,.15);color:var(--info);}
+        .cs-waiting{background:rgba(210,153,34,.18);color:var(--warn);}
         .cs-exited{background:rgba(110,118,129,.15);color:var(--text-mid);}
 
         /* ---- fre / TT 开关 active 状态 ---- */
@@ -788,6 +806,7 @@
         let dirtySet = new Set(); // 有未保存修改的文件集合
         let dragPath = null;      // 标签页拖拽中的源文件路径
         let saveTimer = null;
+        let consoleWaitTimer = null; // "等待输入"提示的延迟计时器
         let selectedFolder = "";
         let selectedFolderElement = null;
         let expandedFolders = new Set();
@@ -963,6 +982,293 @@
             if (pos >= op.end) return pos + op.text.length - (op.end - op.start);
             return op.start + op.text.length;
         }
+
+        // ===================== OT 核心 (ot.js TextOperation 移植) =====================
+        function otIsRetain(op){ return typeof op === 'number' && op > 0; }
+        function otIsInsert(op){ return typeof op === 'string'; }
+        function otIsDelete(op){ return typeof op === 'number' && op < 0; }
+        class TextOp {
+            constructor(){ this.ops = []; this.baseLength = 0; this.targetLength = 0; }
+            retain(n){ n = n|0; if(n === 0) return this;
+                this.baseLength += n; this.targetLength += n;
+                const last = this.ops[this.ops.length-1];
+                if(otIsRetain(last)) this.ops[this.ops.length-1] = last + n; else this.ops.push(n);
+                return this; }
+            insert(str){ if(str === '') return this;
+                this.targetLength += str.length;
+                const ops = this.ops; const last = ops[ops.length-1];
+                if(otIsInsert(last)){ ops[ops.length-1] = last + str; }
+                else if(otIsDelete(last)){ if(otIsInsert(ops[ops.length-2])) ops[ops.length-2] += str; else { ops[ops.length] = last; ops[ops.length-2] = str; } }
+                else ops.push(str);
+                return this; }
+            delete(n){ if(typeof n === 'string') n = n.length; n = n|0;
+                if(n === 0) return this; if(n > 0) n = -n;
+                this.baseLength -= n;
+                const last = this.ops[this.ops.length-1];
+                if(otIsDelete(last)) this.ops[this.ops.length-1] += n; else this.ops.push(n);
+                return this; }
+            apply(str){ if(str.length !== this.baseLength) throw new Error('OT base length mismatch');
+                let out = ''; let i = 0;
+                for(const op of this.ops){ if(otIsRetain(op)){ out += str.slice(i, i+op); i += op; }
+                    else if(otIsInsert(op)){ out += op; } else { i += -op; } }
+                if(i !== str.length) throw new Error('OT did not consume whole string');
+                return out; }
+            static fromJSON(ops){ const o = new TextOp();
+                for(const op of ops){ if(otIsRetain(op)) o.retain(op); else if(otIsInsert(op)) o.insert(op); else if(otIsDelete(op)) o.delete(op); else throw new Error('bad op'); }
+                return o; }
+            toJSON(){ return this.ops.slice(); }
+            static fromSplice(s, docLen){ const o = new TextOp();
+                if(s.start > 0) o.retain(s.start);
+                const d = s.end - s.start; if(d > 0) o.delete(d);
+                if(s.text.length > 0) o.insert(s.text);
+                const tail = docLen - s.end; if(tail > 0) o.retain(tail);
+                return o; }
+            compose(op2){ const op1 = this;
+                if(op1.targetLength !== op2.baseLength) throw new Error('OT compose length');
+                const operation = new TextOp();
+                const ops1 = op1.ops, ops2 = op2.ops; let i1 = 0, i2 = 0;
+                let o1 = ops1[i1++], o2 = ops2[i2++];
+                while(true){
+                    if(typeof o1 === 'undefined' && typeof o2 === 'undefined') break;
+                    if(otIsDelete(o1)){ operation.delete(o1); o1 = ops1[i1++]; continue; }
+                    if(otIsInsert(o2)){ operation.insert(o2); o2 = ops2[i2++]; continue; }
+                    if(typeof o1 === 'undefined') throw new Error('OT compose op1 short');
+                    if(typeof o2 === 'undefined') throw new Error('OT compose op1 long');
+                    if(otIsRetain(o1) && otIsRetain(o2)){
+                        if(o1 > o2){ operation.retain(o2); o1 = o1 - o2; o2 = ops2[i2++]; }
+                        else if(o1 === o2){ operation.retain(o1); o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { operation.retain(o1); o2 = o2 - o1; o1 = ops1[i1++]; }
+                    } else if(otIsInsert(o1) && otIsDelete(o2)){
+                        if(o1.length > -o2){ o1 = o1.slice(-o2); o2 = ops2[i2++]; }
+                        else if(o1.length === -o2){ o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { o2 = o2 + o1.length; o1 = ops1[i1++]; }
+                    } else if(otIsInsert(o1) && otIsRetain(o2)){
+                        if(o1.length > o2){ operation.insert(o1.slice(0, o2)); o1 = o1.slice(o2); o2 = ops2[i2++]; }
+                        else if(o1.length === o2){ operation.insert(o1); o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { operation.insert(o1); o2 = o2 - o1.length; o1 = ops1[i1++]; }
+                    } else if(otIsRetain(o1) && otIsDelete(o2)){
+                        if(o1 > -o2){ operation.delete(o2); o1 = o1 + o2; o2 = ops2[i2++]; }
+                        else if(o1 === -o2){ operation.delete(o2); o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { operation.delete(o1); o2 = o2 + o1; o1 = ops1[i1++]; }
+                    } else { throw new Error('OT compose invalid'); }
+                }
+                return operation; }
+            static transform(operation1, operation2){
+                if(operation1.baseLength !== operation2.baseLength) throw new Error('OT transform base length');
+                const op1p = new TextOp(); const op2p = new TextOp();
+                const ops1 = operation1.ops, ops2 = operation2.ops;
+                let i1 = 0, i2 = 0; let o1 = ops1[i1++], o2 = ops2[i2++];
+                while(true){
+                    if(typeof o1 === 'undefined' && typeof o2 === 'undefined') break;
+                    if(otIsInsert(o1)){ op1p.insert(o1); op2p.retain(o1.length); o1 = ops1[i1++]; continue; }
+                    if(otIsInsert(o2)){ op1p.retain(o2.length); op2p.insert(o2); o2 = ops2[i2++]; continue; }
+                    if(typeof o1 === 'undefined') throw new Error('OT transform op1 short');
+                    if(typeof o2 === 'undefined') throw new Error('OT transform op2 long');
+                    let minl;
+                    if(otIsRetain(o1) && otIsRetain(o2)){
+                        if(o1 > o2){ minl = o2; o1 = o1 - o2; o2 = ops2[i2++]; }
+                        else if(o1 === o2){ minl = o2; o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { minl = o1; o2 = o2 - o1; o1 = ops1[i1++]; }
+                        op1p.retain(minl); op2p.retain(minl);
+                    } else if(otIsDelete(o1) && otIsDelete(o2)){
+                        if(-o1 > -o2){ o1 = o1 - o2; o2 = ops2[i2++]; }
+                        else if(o1 === o2){ o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { o2 = o2 - o1; o1 = ops1[i1++]; }
+                    } else if(otIsDelete(o1) && otIsRetain(o2)){
+                        if(-o1 > o2){ minl = o2; o1 = o1 + o2; o2 = ops2[i2++]; }
+                        else if(-o1 === o2){ minl = o2; o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { minl = -o1; o2 = o2 + o1; o1 = ops1[i1++]; }
+                        op1p.delete(minl);
+                    } else if(otIsRetain(o1) && otIsDelete(o2)){
+                        if(o1 > -o2){ minl = -o2; o1 = o1 + o2; o2 = ops2[i2++]; }
+                        else if(o1 === -o2){ minl = o1; o1 = ops1[i1++]; o2 = ops2[i2++]; }
+                        else { minl = o1; o2 = o2 + o1; o1 = ops1[i1++]; }
+                        op2p.delete(minl);
+                    } else { throw new Error('OT transform incompatible'); }
+                }
+                return [op1p, op2p];
+            }
+        }
+
+        // ===================== OT 客户端状态机 =====================
+        let otRevision = -1;      // 已同步到的服务端权威版本号
+        let otOutstanding = null; // 已发送待确认的本地操作(TextOp)
+        let otBuffer = null;      // 待发送的本地操作(TextOp)
+        let otInbox = new Map();  // 版本号 -> {kind:'ack'|'remote', op}
+        let otGapTimer = null;
+
+        function otReset(){
+            otRevision = -1; otOutstanding = null; otBuffer = null;
+            otInbox.clear(); if(otGapTimer){ clearTimeout(otGapTimer); otGapTimer = null; }
+        }
+        function otSend(op){ socket.emit('edit', { path: currentFile, op: op.toJSON(), base: otRevision }, (ack)=>otHandleAck(ack)); }
+        function otHandleAck(ack){
+            if(!ack) return;
+            if(ack.resync || ack.version == null){ resyncDoc(); return; }
+            otEnqueue(ack.version, 'ack');
+        }
+        function otEnqueue(version, kind, op){
+            if(typeof version !== 'number' || version <= otRevision) return;
+            otInbox.set(version, {kind, op});
+            otDrain();
+        }
+        function otDrain(){
+            while(otInbox.has(otRevision + 1)){
+                const m = otInbox.get(otRevision + 1);
+                otInbox.delete(otRevision + 1);
+                if(m.kind === 'ack') otApplyAck(); else otApplyServer(m.op);
+            }
+            if(otInbox.size > 0 && !otInbox.has(otRevision + 1)){
+                if(!otGapTimer) otGapTimer = setTimeout(()=>{ otGapTimer = null; if(otInbox.size > 0 && !otInbox.has(otRevision + 1)) resyncDoc(); }, 2000);
+            } else if(otGapTimer){ clearTimeout(otGapTimer); otGapTimer = null; }
+        }
+        function otApplyLocal(op){
+            if(otRevision < 0) return;
+            if(otOutstanding === null){ otOutstanding = op; otSend(op); }
+            else if(otBuffer !== null){ otBuffer = otBuffer.compose(op); }
+            else { otBuffer = op; }
+        }
+        function otApplyServer(op){
+            otRevision += 1;
+            if(otOutstanding === null){
+                applyingRemote = true; applyOpToEditor(op); applyingRemote = false;
+            } else if(otBuffer !== null){
+                const p1 = TextOp.transform(otOutstanding, op);
+                const p2 = TextOp.transform(otBuffer, p1[1]);
+                applyingRemote = true; applyOpToEditor(p2[1]); applyingRemote = false;
+                otOutstanding = p1[0]; otBuffer = p2[0];
+            } else {
+                const p1 = TextOp.transform(otOutstanding, op);
+                applyingRemote = true; applyOpToEditor(p1[1]); applyingRemote = false;
+                otOutstanding = p1[0];
+            }
+        }
+        function otApplyAck(){
+            otRevision += 1;
+            if(otOutstanding !== null){
+                if(otBuffer !== null){ const b = otBuffer; otBuffer = null; otOutstanding = b; otSend(b); }
+                else { otOutstanding = null; }
+            }
+        }
+        function applyOpToEditor(op){
+            if(currentEditorType === 'textarea'){
+                const oldVal = codeEl.value;
+                const newVal = op.apply(oldVal);
+                const s = transformCursor(codeEl.selectionStart, op);
+                const e = transformCursor(codeEl.selectionEnd, op);
+                codeEl.value = newVal;
+                codeEl.setSelectionRange(s, e);
+                lastContent = newVal;
+                updateGutter();
+            } else if(monacoEditor){
+                const model = monacoEditor.getModel();
+                const edits = [];
+                let pos = 0;
+                for(const c of op.ops){
+                    if(otIsRetain(c)){ pos += c; }
+                    else if(otIsInsert(c)){
+                        const p = model.getPositionAt(pos);
+                        edits.push({ range: new monaco.Range(p.lineNumber, p.column, p.lineNumber, p.column), text: c });
+                    } else {
+                        const n = -c;
+                        const s = model.getPositionAt(pos);
+                        const e = model.getPositionAt(pos + n);
+                        edits.push({ range: new monaco.Range(s.lineNumber, s.column, e.lineNumber, e.column), text: '' });
+                        pos += n;
+                    }
+                }
+                model.applyEdits(edits);
+                lastContent = monacoEditor.getValue();
+            }
+        }
+        function transformCursor(p, op){
+            let oldIndex = 0, newIndex = 0;
+            for(const c of op.ops){
+                if(otIsRetain(c)){
+                    if(oldIndex + c <= p){ oldIndex += c; newIndex += c; }
+                    else { return newIndex + (p - oldIndex); }
+                } else if(otIsInsert(c)){
+                    newIndex += c.length;
+                } else {
+                    const n = -c;
+                    if(oldIndex + n <= p){ oldIndex += n; }
+                    else { return newIndex; }
+                }
+            }
+            return newIndex;
+        }
+
+        // ===================== 协作者光标同步 =====================
+        let remoteCursors = {};   // sid -> {username, color, offset, ts}
+        let remoteWidgets = {};   // sid -> Monaco content widget
+        let cursorEmitTimer = null;
+
+        function emitCursor(){
+            if(!currentFile) return;
+            let offset = 0;
+            if(currentEditorType === 'textarea'){
+                offset = codeEl.selectionStart;
+            } else if(monacoEditor){
+                const pos = monacoEditor.getPosition();
+                if(pos) offset = monacoEditor.getModel().getOffsetAt(pos);
+            }
+            socket.emit('cursor', { path: currentFile, offset: offset });
+        }
+        function scheduleCursor(){
+            // 节流: 最多 ~80ms 上报一次, 保证毫秒级同步又不刷爆
+            if(cursorEmitTimer) return;
+            cursorEmitTimer = setTimeout(()=>{ cursorEmitTimer = null; emitCursor(); }, 80);
+        }
+        function renderRemoteCursors(){
+            const now = Date.now();
+            for(const sid in remoteCursors){
+                if(now - remoteCursors[sid].ts > 12000) delete remoteCursors[sid]; // 12s 无心跳视为离开
+            }
+            if(currentEditorType === 'monaco' && monacoEditor){
+                // 移除已离开用户的控件
+                for(const sid in remoteWidgets){
+                    if(!remoteCursors[sid]){
+                        try { monacoEditor.removeContentWidget(remoteWidgets[sid]); } catch(e){}
+                        delete remoteWidgets[sid];
+                    }
+                }
+                const model = monacoEditor.getModel();
+                const len = model.getValueLength();
+                for(const sid in remoteCursors){
+                    const u = remoteCursors[sid];
+                    const off = Math.max(0, Math.min(u.offset, len));
+                    const pos = model.getPositionAt(off);
+                    if(remoteWidgets[sid]){
+                        try { monacoEditor.removeContentWidget(remoteWidgets[sid]); } catch(e){}
+                    }
+                    const dom = document.createElement('div');
+                    dom.className = 'remote-cursor';
+                    dom.style.borderLeftColor = u.color;
+                    dom.innerHTML = `<span class="remote-cursor-name" style="background:${u.color}">${escapeHtml(u.username)}</span>`;
+                    const widget = {
+                        getId: () => 'rc-' + sid,
+                        getDomNode: () => dom,
+                        getPosition: () => ({ position: { lineNumber: pos.lineNumber, column: pos.column }, preference: [monaco.editor.ContentWidgetPositionPreference.EXACT] }),
+                    };
+                    monacoEditor.addContentWidget(widget);
+                    remoteWidgets[sid] = widget;
+                }
+            } else {
+                // textarea: 计算行号并在行号栏显示彩色圆点
+                const text = codeEl.value;
+                for(const sid in remoteCursors){
+                    const u = remoteCursors[sid];
+                    u.line = text.slice(0, Math.max(0, Math.min(u.offset, text.length))).split('\n').length;
+                }
+                updateGutter();
+            }
+        }
+        function clearRemoteCursor(sid){
+            if(remoteWidgets[sid] && monacoEditor){ try { monacoEditor.removeContentWidget(remoteWidgets[sid]); } catch(e){} }
+            delete remoteWidgets[sid];
+            delete remoteCursors[sid];
+        }
+
         function showToast(message, type='info', duration=3000){
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
@@ -1061,63 +1367,90 @@
             if(data.path !== currentFile) return;
             presenceList.innerHTML = '';
             const users = data.users.length ? data.users : [username];
+            // 清理已离开用户的远程光标
+            const presentNames = new Set(users);
+            for(const sid in remoteCursors){
+                if(!presentNames.has(remoteCursors[sid].username)) clearRemoteCursor(sid);
+            }
             users.forEach(u=>{
                 const chip = document.createElement('span');
                 chip.className = 'user-chip';
-                chip.innerHTML = `<span class="swatch" style="background:${colorFor(u)}"></span>${u}`;
+                chip.innerHTML = `<span class="swatch" style="background:${colorFor(u)}"></span>${escapeHtml(u)}`;
                 presenceList.appendChild(chip);
             });
         });
-        socket.on('edit', (data)=>{
-            if(data.path !== currentFile || applyingRemote) return;
+        socket.on('cursor', (data)=>{
+            if(data.path !== currentFile) return;
+            if(!data || typeof data.offset !== 'number') return;
+            const uname = data.username || '匿名';
+            remoteCursors[data.sid || 'unknown'] = {
+                username: uname,
+                color: colorFor(uname),
+                offset: data.offset,
+                ts: Date.now()
+            };
+            renderRemoteCursors();
+        });
+        socket.on('doc_sync', (data)=>{
+            // 加入房间后服务端推送的权威内容, 覆盖本地可能过时的缓存, 并重置 OT 状态
+            if(!data || data.path !== currentFile) return;
+            fileContentCache[data.path] = data.content;
+            otReset();
+            otRevision = (typeof data.version === 'number') ? data.version : 0;
             applyingRemote = true;
-            if(data.op){
-                // 操作化同步:应用增量编辑
-                if(currentEditorType === 'textarea'){
-                    const oldVal = codeEl.value;
-                    const newVal = applyOp(oldVal, data.op);
-                    const selStart = adjustCursor(codeEl.selectionStart, data.op);
-                    const selEnd = adjustCursor(codeEl.selectionEnd, data.op);
-                    codeEl.value = newVal;
-                    codeEl.setSelectionRange(selStart, selEnd);
-                    lastContent = newVal;
-                    updateGutter();
-                } else if(monacoEditor){
-                    const model = monacoEditor.getModel();
-                    const startPos = model.getPositionAt(data.op.start);
-                    const endPos = model.getPositionAt(data.op.end);
-                    model.applyEdits([{
-                        range: new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column),
-                        text: data.op.text
-                    }]);
-                    lastContent = monacoEditor.getValue();
-                }
-            } else if(data.content !== undefined){
-                // 向后兼容:整段替换
-                setEditorContent(data.content);
-                lastContent = normalizeContent(data.content);
-            }
+            setEditorContent(data.content);
             applyingRemote = false;
         });
+        function resyncDoc(){
+            // 版本缺口/变换失败时, 请求一次权威内容重新对齐
+            if(!currentFile) return;
+            otReset();
+            socket.emit('join', { path: currentFile, username: username });
+        }
+        socket.on('edit', (data)=>{
+            if(data.path !== currentFile) return;
+            if(typeof data.version === 'number' && data.op){
+                let op;
+                try { op = TextOp.fromJSON(data.op); }
+                catch(e){ resyncDoc(); return; }
+                otEnqueue(data.version, 'remote', op);
+            }
+        });
         socket.on('saved', (data)=>{ dirtySet.delete(data.path); if(data.path === currentFile) dirty = false; updateTabDirty(data.path); });
-        socket.on('run_output', (data)=>{ if(data.path !== currentFile) return; appendConsole(data.text); });
+        socket.on('compile_start', (data)=>{
+            if(data.path !== currentFile) return;
+            consoleStatus.textContent = '编译中...';
+            consoleStatus.className = 'cs-compiling';
+        });
+        socket.on('run_output', (data)=>{
+            if(data.path !== currentFile) return;
+            appendConsole(data.text);
+        });
         socket.on('run_started', (data)=>{
             if(data.path !== currentFile) return;
-            if(!freEnabled) {
-                const initialInput = consoleInput.value;
-                if(initialInput) {
-                    socket.emit('run_input', { text: initialInput, no_newline: true });
-                    // 不清空，保留输入方便查看
-                }
-            } else {
+            // 编译已完成、进程已启动(输入已在启动时喂入), 进入运行中
+            consoleStatus.textContent = '运行中...';
+            consoleStatus.className = 'cs-running';
+            consoleInput.disabled = true;
+            btnSendInput.disabled = true;
+            if(freEnabled) {
                 appendConsole('程序已运行，输出重定向到文件，结束后将读取输出文件内容。\n');
             }
         });
         socket.on('run_exit', async (data)=>{
             if(data.path !== currentFile) return;
-            consoleStatus.textContent = `已退出（代码 ${data.code}）`;
+            clearTimeout(consoleWaitTimer);
+            let statusText;
+            if(data.reason === 'compile_error') statusText = '编译失败';
+            else if(data.verdict){
+                const vText = { TLE:'时间超限', MLE:'内存超限', OLE:'输出超限', RE:'运行时错误' }[data.verdict] || data.verdict;
+                statusText = `${data.verdict} · ${vText}（${data.time_ms||0}ms / ${data.mem_kb||0}KB）`;
+            } else {
+                statusText = `已退出（代码 ${data.code}）`;
+            }
+            consoleStatus.textContent = statusText;
             consoleStatus.className = 'cs-exited';
-            consoleInput.disabled = true;
+            consoleInput.disabled = false; // 运行结束后恢复输入框, 便于提前填写下一次运行的输入数据
             consoleStop.disabled = true;
             btnRunInConsole.disabled = false;
             btnSendInput.disabled = true;
@@ -1211,8 +1544,15 @@
         function updateGutter(){
             const lines = codeEl.value.split('\n').length;
             let out = '';
-            for(let i=1; i<=lines; i++) out += i + '\n';
-            gutterEl.textContent = out;
+            for(let i=1; i<=lines; i++){
+                // 该行上的远程光标(仅 textarea 模式显示彩色圆点)
+                const dots = Object.values(remoteCursors)
+                    .filter(u => u.line === i)
+                    .map(u => `<span class="gutter-cursor" style="background:${u.color}" title="${escapeHtml(u.username)}"></span>`)
+                    .join('');
+                out += `<span class="gutter-line">${i}${dots}</span>\n`;
+            }
+            gutterEl.innerHTML = out;
             gutterEl.scrollTop = codeEl.scrollTop;
         }
         codeEl.addEventListener('scroll', ()=>{ gutterEl.scrollTop = codeEl.scrollTop; if(codeOverlay){ codeOverlay.scrollTop = codeEl.scrollTop; codeOverlay.scrollLeft = codeEl.scrollLeft; } });
@@ -1221,12 +1561,13 @@
             const newContent = codeEl.value;
             const op = computeDiff(lastContent, newContent);
             if(op.start !== op.end || op.text.length > 0){
-                socket.emit('edit', { path: currentFile, op: op });
+                otApplyLocal(TextOp.fromSplice(op, lastContent.length));
             }
             lastContent = newContent;
             updateGutter();
             updateCodeOverlay();
             markDirty(currentFile);
+            scheduleCursor();
             clearTimeout(saveTimer);
             saveTimer = setTimeout(()=>saveFile(true), 1500);
             clearTimeout(lspChangeTimer);
@@ -1236,6 +1577,9 @@
                 }
             }, 400);
         });
+        // 光标/选区移动也上报(无输入时的移动)
+        codeEl.addEventListener('click', scheduleCursor);
+        codeEl.addEventListener('keyup', scheduleCursor);
         codeEl.addEventListener('keydown', function(e){
             if(e.key === 'Tab' && e.shiftKey){
                 // Shift+Tab: 反缩进(必须先判断)
@@ -1960,14 +2304,15 @@
                 monacoEditor.onDidChangeModelContent((e)=>{
                     if(applyingRemote || !currentFile) return;
                     const model = monacoEditor.getModel();
-                    // 发送增量操作而非整段内容
-                    for(const change of e.changes){
-                        const startOffset = model.getOffsetAt(change.range.getStartPosition());
-                        const endOffset = model.getOffsetAt(change.range.getEndPosition());
-                        socket.emit('edit', { path: currentFile, op: { start: startOffset, end: endOffset, text: change.text } });
+                    // 发送增量操作(与 textarea 一致, 按前后内容 diff 成单次替换)
+                    const newContent = model.getValue();
+                    const op = computeDiff(lastContent, newContent);
+                    if(op.start !== op.end || op.text.length > 0){
+                        otApplyLocal(TextOp.fromSplice(op, lastContent.length));
                     }
-                    lastContent = monacoEditor.getValue();
+                    lastContent = newContent;
                     markDirty(currentFile);
+                    scheduleCursor();
                     clearTimeout(saveTimer);
                     saveTimer = setTimeout(()=>saveFile(true), 1500);
                     // 防抖同步给 clangd, 触发实时语法诊断
@@ -1978,6 +2323,8 @@
                         }
                     }, 400);
                 });
+                monacoEditor.onDidChangeCursorPosition(scheduleCursor);
+                monacoEditor.onDidChangeCursorSelection(scheduleCursor);
                 monacoLoaded = true;
                 if(currentFile){
                     const content = fileContentCache[currentFile];
@@ -2266,6 +2613,11 @@
         }
         function activateFile(path){
             currentFile = path;
+            otReset();
+            // 清除上一文件的远程光标
+            for(const sid in remoteWidgets){ if(monacoEditor){ try { monacoEditor.removeContentWidget(remoteWidgets[sid]); } catch(e){} } }
+            remoteWidgets = {};
+            remoteCursors = {};
             filepathEl.textContent = path;
             emptyState.innerHTML = '<div style="font-family:var(--mono);font-size:28px;color:var(--line);">{ }</div><div>从左侧选择文件开始编辑</div>';
             emptyState.style.display = 'none';
@@ -2292,6 +2644,7 @@
             btnFre.classList.toggle('active', freEnabled);
             consoleOutput.textContent = '';
             consoleStatus.textContent = '空闲';
+            consoleInput.value = ''; // 切换文件后清空运行输入框，避免残留输入误用到新文件的运行/测试中
             consoleInput.disabled = true;
             consoleStop.disabled = true;
             btnRunInConsole.disabled = false;
@@ -2338,9 +2691,8 @@
         // ===================== 保存与备份 =====================
         async function persistFile(path){
             if(!path) return;
-            const content = normalizeContent(path === currentFile ? getEditorContent() : (fileContentCache[path] ?? ''));
-            await fetch('/api/file', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:path, content:content}) });
-            socket.emit('save', { path: path, content: content });
+            // 由服务端按 OT 权威内容落盘, 避免客户端本地视图覆盖并发编辑; 也省一次 HTTP 往返
+            socket.emit('save', { path: path, content: normalizeContent(path === currentFile ? getEditorContent() : (fileContentCache[path] ?? '')) });
             dirtySet.delete(path);
             if(path === currentFile) dirty = false;
             updateTabDirty(path);
@@ -2431,7 +2783,7 @@
             if (currentFile) {
                 const op = computeDiff(oldContent, newContent);
                 if (op.start !== op.end || op.text.length > 0) {
-                    socket.emit('edit', { path: currentFile, op: op });
+                    otApplyLocal(TextOp.fromSplice(op, oldContent.length));
                 }
                 markDirty(currentFile);
                 btnBackup.disabled = false;
@@ -2637,13 +2989,14 @@
             if (!currentFile) return;
             openDock('console');
             consoleOutput.textContent = '';
-            consoleStatus.textContent = '运行中...';
-            consoleStatus.className = 'cs-running';
-            consoleInput.disabled = freEnabled;
+            const inputText = consoleInput.value; // 先输入, 再运行, 运行后自动作为 stdin 喂入
+            consoleStatus.textContent = '编译中...';
+            consoleStatus.className = 'cs-compiling';
+            consoleInput.disabled = true;
             btnRunInConsole.disabled = true;
             consoleStop.disabled = false;
-            btnSendInput.disabled = freEnabled;
-            socket.emit('run_start', { path: currentFile, content: getEditorContent() });
+            btnSendInput.disabled = true;
+            socket.emit('run_start', { path: currentFile, content: getEditorContent(), stdin: inputText });
         });
 
         btnSendInput.addEventListener('click', () => {
@@ -2652,10 +3005,22 @@
             socket.emit('run_input', { text: text, no_newline: true });
             appendConsole(text + '\n');
             consoleInput.value = '';
+            // 用户已发送输入，重新进入"等待下一次输出/输入"的判断
+            clearTimeout(consoleWaitTimer);
+            if(consoleStatus.className === 'cs-waiting'){
+                consoleStatus.textContent = '运行中...';
+                consoleStatus.className = 'cs-running';
+            }
+            consoleWaitTimer = setTimeout(()=>{
+                if(consoleStatus.className === 'cs-running'){
+                    consoleStatus.textContent = '等待输入...';
+                    consoleStatus.className = 'cs-waiting';
+                }
+            }, 800);
         });
 
         btnClearInput.addEventListener('click', () => { consoleInput.value = ''; });
-        consoleStop.addEventListener('click', () => socket.emit('run_stop', {}));
+        consoleStop.addEventListener('click', () => { clearTimeout(consoleWaitTimer); socket.emit('run_stop', {}); });
 
         function appendConsole(text){
             const atBottom = consoleOutput.scrollTop + consoleOutput.clientHeight >= consoleOutput.scrollHeight - 4;
@@ -2793,19 +3158,21 @@
         uploadZipInput.addEventListener('change', async ()=>{
             const file = uploadZipInput.files[0];
             if(!file) return;
-            // 目标目录:当前文件所在目录,否则 workspace 根
-            let dir = '';
-            if(currentFile && currentFile.includes('/')){
-                dir = currentFile.substring(0, currentFile.lastIndexOf('/'));
+            if(!currentFile){
+                showToast('请先打开要导入测试点的源文件', 'warning');
+                uploadZipInput.value='';
+                return;
             }
             const fd = new FormData();
             fd.append('file', file);
-            fd.append('dir', dir);
+            // 后端按 source(当前源文件路径)推导出对应的 {base}_T/ 测试点目录，
+            // 之前误传了 dir(所在文件夹)，导致字段名与后端不匹配、导入总是失败。
+            fd.append('source', currentFile);
             try{
                 const res = await fetch('/api/upload_tests', { method:'POST', body: fd });
                 const data = await res.json();
                 if(data.ok){
-                    showToast(`导入完成: ${data.count} 个文件`, 'success');
+                    showToast(`导入完成: 新增/覆盖 ${data.count} 个文件`, 'success');
                     loadTree();
                     if(currentFile && JUDGEABLE_EXTS.includes(extOf(currentFile))){
                         await loadCPH(currentFile);
@@ -2887,20 +3254,26 @@
             document.body.appendChild(overlay);
             overlay.querySelector('#import-cancel').addEventListener('click', ()=>overlay.remove());
             overlay.querySelector('#import-ok').addEventListener('click', async ()=>{
-                const checks = overlay.querySelectorAll('.import-check:checked');
-                const base = currentFile.replace(/\.[^.]+$/, '');
-                const promises = [];
-                for(const c of checks){
-                    const num = c.dataset.num;
-                    const t = srcTests.find(x => ((x.name||'').match(/(\d+)/)||['0'])[0] === num);
-                    if(!t) continue;
-                    promises.push(fetch('/api/test/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:`${base}_T/${num}.in`, content:t.input||''}) }));
-                    promises.push(fetch('/api/test/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:`${base}_T/${num}.out`, content:t.expected||''}) }));
-                }
-                await Promise.all(promises);
+                const nums = [...overlay.querySelectorAll('.import-check:checked')].map(c => c.dataset.num);
                 overlay.remove();
-                showToast('导入完成', 'success');
-                await loadCPH(currentFile);
+                if(!nums.length){ showToast('未选择任何测试点', 'warning'); return; }
+                try{
+                    // 交给后端 /api/test/import: 编号冲突时自动重映射, 不覆盖原测试点
+                    const res = await fetch('/api/test/import', {
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({ source: srcName, target: currentFile, nums: nums })
+                    });
+                    const data = await res.json();
+                    if(data.ok){
+                        showToast(`导入完成: ${data.count} 个文件（冲突编号已自动重映射）`, 'success');
+                        await loadCPH(currentFile);
+                    } else {
+                        showToast('导入失败: ' + (data.error || '未知错误'), 'error');
+                    }
+                }catch(e){
+                    showToast('导入请求失败', 'error');
+                }
             });
         }
 
