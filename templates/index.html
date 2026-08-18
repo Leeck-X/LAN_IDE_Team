@@ -964,7 +964,7 @@
 
         // ===================== 工具函数 =====================
         function normalizeContent(content){ return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n'); }
-        function escapeHtml(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+        function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
         // ---- 操作化编辑同步:计算 diff / 应用 op ----
         function computeDiff(oldStr, newStr){
@@ -1129,7 +1129,10 @@
                 if(m.kind === 'ack') otApplyAck(); else otApplyServer(m.op);
             }
             if(otInbox.size > 0 && !otInbox.has(otRevision + 1)){
-                if(!otGapTimer) otGapTimer = setTimeout(()=>{ otGapTimer = null; if(otInbox.size > 0 && !otInbox.has(otRevision + 1)) resyncDoc(); }, 2000);
+                // ack 回调与 room 广播是两条独立的网络路径, 在并发编辑下允许短暂乱序到达属正常情况,
+                // 不代表真的丢包/断连。给足够宽的窗口再判定为需要 resync, 避免把仍在正常协作的
+                // 编辑器误判为“掉线”而切换只读, 打断本应继续的并发编辑。
+                if(!otGapTimer) otGapTimer = setTimeout(()=>{ otGapTimer = null; if(otInbox.size > 0 && !otInbox.has(otRevision + 1)) resyncDoc(); }, 8000);
             } else if(otGapTimer){ clearTimeout(otGapTimer); otGapTimer = null; }
         }
         function otApplyLocal(op){
@@ -1234,7 +1237,7 @@
             for(const sid in remoteCursors){
                 if(now - remoteCursors[sid].ts > 12000) delete remoteCursors[sid]; // 12s 无心跳视为离开
             }
-            if(currentEditorType === 'monaco' && monacoEditor){
+            if(currentEditorType !== 'textarea' && monacoEditor){
                 // 移除已离开用户的控件
                 for(const sid in remoteWidgets){
                     if(!remoteCursors[sid]){
@@ -1385,10 +1388,14 @@
             if(data.path !== currentFile) return;
             presenceList.innerHTML = '';
             const users = data.users.length ? data.users : [username];
-            // 清理已离开用户的远程光标
+            // 清理已离开用户的远程光标: 优先按 sid 精确匹配(同名用户不会互相误删),
+            // 旧版服务器无 sids 字段时回退按用户名匹配
+            const presentSids = new Set(data.sids || []);
             const presentNames = new Set(users);
             for(const sid in remoteCursors){
-                if(!presentNames.has(remoteCursors[sid].username)) clearRemoteCursor(sid);
+                const gone = presentSids.size ? !presentSids.has(sid)
+                                              : !presentNames.has(remoteCursors[sid].username);
+                if(gone) clearRemoteCursor(sid);
             }
             users.forEach(u=>{
                 const chip = document.createElement('span');
@@ -1461,15 +1468,15 @@
         socket.on('run_exit', async (data)=>{
             if(data.path !== currentFile) return;
             clearTimeout(consoleWaitTimer);
-            let statusText;
-            if(data.reason === 'compile_error') statusText = '编译失败';
+            let exitText;   // 命名避免遮蔽全局连接状态元素 statusText
+            if(data.reason === 'compile_error') exitText = '编译失败';
             else if(data.verdict){
                 const vText = { TLE:'时间超限', MLE:'内存超限', OLE:'输出超限', RE:'运行时错误' }[data.verdict] || data.verdict;
-                statusText = `${data.verdict} · ${vText}（${data.time_ms||0}ms / ${data.mem_kb||0}KB）`;
+                exitText = `${data.verdict} · ${vText}（${data.time_ms||0}ms / ${data.mem_kb||0}KB）`;
             } else {
-                statusText = `已退出（代码 ${data.code}）`;
+                exitText = `已退出（代码 ${data.code}）`;
             }
-            consoleStatus.textContent = statusText;
+            consoleStatus.textContent = exitText;
             consoleStatus.className = 'cs-exited';
             consoleInput.disabled = false; // 运行结束后恢复输入框, 便于提前填写下一次运行的输入数据
             consoleStop.disabled = true;
@@ -1557,7 +1564,16 @@
                 updateGutter();
                 updateCodeOverlay();
             } else if(monacoEditor){
-                monacoEditor.setValue(content);
+                // 用新 model 整体替换而非 setValue: setValue 会进入 undo 栈,
+                // 同步后按 Ctrl+Z 会把远端内容整体回退并作为反向 op 广播给所有人
+                const old = monacoEditor.getModel();
+                if(old){
+                    const nm = monaco.editor.createModel(content, old.getLanguageId());
+                    monacoEditor.setModel(nm);
+                    old.dispose();
+                } else {
+                    monacoEditor.setValue(content);
+                }
             }
         }
 
@@ -1577,8 +1593,18 @@
             gutterEl.scrollTop = codeEl.scrollTop;
         }
         codeEl.addEventListener('scroll', ()=>{ gutterEl.scrollTop = codeEl.scrollTop; if(codeOverlay){ codeOverlay.scrollTop = codeEl.scrollTop; codeOverlay.scrollLeft = codeEl.scrollLeft; } });
+        let imeComposing = false;
+        codeEl.addEventListener('compositionstart', ()=>{ imeComposing = true; });
+        codeEl.addEventListener('compositionend', ()=>{
+            imeComposing = false;
+            // 组合结束后统一做一次 diff(部分浏览器不会自动再触发 input)
+            codeEl.dispatchEvent(new Event('input', {bubbles:true}));
+        });
         codeEl.addEventListener('input', ()=>{
             if(applyingRemote || !currentFile) return;
+            // IME 组合期间跳过: 拼音中间态不应作为多条 OT op 实时广播(协作者会看到字符闪烁),
+            // compositionend 后统一触发一次 input 做完整 diff
+            if(imeComposing) return;
             const newContent = codeEl.value;
             const op = computeDiff(lastContent, newContent);
             if(op.start !== op.end || op.text.length > 0){
@@ -1602,6 +1628,8 @@
         codeEl.addEventListener('click', scheduleCursor);
         codeEl.addEventListener('keyup', scheduleCursor);
         codeEl.addEventListener('keydown', function(e){
+            // 只读(未同步/断线)时程序化修改 value 不会触发有效 OT, 反而导致内容与基准脱节
+            if(this.readOnly) return;
             if(e.key === 'Tab' && e.shiftKey){
                 // Shift+Tab: 反缩进(必须先判断)
                 e.preventDefault();
@@ -2056,6 +2084,10 @@
                             .filter(s => !prefix || (s.label || '').toLowerCase().startsWith(prefix))
                             .map(s => {
                                 const item = Object.assign({}, s, { range: range });
+                                // 模板缩进统一为 4 空格, 与编辑器 insertSpaces 设置一致(避免混入 tab)
+                                if (typeof item.insertText === 'string' && item.insertText.indexOf('\t') >= 0){
+                                    item.insertText = item.insertText.replace(/\t/g, '    ');
+                                }
                                 // 函数定义式模板(funcDef): 若前面已写返回类型关键字, 扩展 range 覆盖前缀
                                 // 避免 "int int main"/"void void bfs"/"void void dfs" 等重复
                                 if (s.funcDef && retTypeMatch) {
@@ -2444,7 +2476,9 @@
                     markDirty(currentFile);
                     scheduleCursor();
                     clearTimeout(saveTimer);
-                    saveTimer = setTimeout(()=>saveFile(true), 1500);
+                    // 闭包捕获文件路径: 1.5s 内切换文件时, 自动保存仍作用于正确的文件
+                    const monacoSavePath = currentFile;
+                    saveTimer = setTimeout(()=>persistFile(monacoSavePath), 1500);
                     // 防抖同步给 clangd, 触发实时语法诊断
                     clearTimeout(lspChangeTimer);
                     lspChangeTimer = setTimeout(()=>{
@@ -2695,12 +2729,42 @@
         }
         function switchEditorTab(path){
             if(path === currentFile) return;
+            clearTimeout(saveTimer);
             if(currentFile){
                 fileContentCache[currentFile] = getEditorContent();
+                // 切走前冲刷未保存内容(服务器按权威内容落盘), 避免 leave 后
+                // 最后一小段编辑只存在于本地缓存而在下次 join 时被权威内容覆盖
+                if(dirtySet.has(currentFile)) persistFile(currentFile);
                 socket.emit('leave', { path: currentFile });
                 socket.emit('run_stop', {});
             }
             activateFile(path);
+        }
+        function handleFileDeleted(path){
+            // 文件被其他用户删除: 关闭对应标签并清理状态, 防止继续编辑把文件"复活"
+            showToast('文件「' + path.split('/').pop() + '」已被删除', 'info', 4000);
+            const idx = openTabs.indexOf(path);
+            if(idx !== -1) openTabs.splice(idx, 1);
+            dirtySet.delete(path);
+            delete fileContentCache[path];
+            if(path === currentFile){
+                const next = openTabs[Math.min(idx, openTabs.length - 1)];
+                if(next){
+                    activateFile(next);
+                } else {
+                    currentFile = null;
+                    editorHost.style.display = 'none';
+                    emptyState.innerHTML = '<div style="font-family:var(--mono);font-size:28px;color:var(--line);">{ }</div><div>从左侧选择文件开始编辑</div>';
+                    emptyState.style.display = 'flex';
+                    filepathEl.textContent = '';
+                    btnPanel.disabled = true; btnFre.disabled = true; btnExport.disabled = true; btnBackup.disabled = true;
+                    btnRunInConsole.disabled = true;
+                    problemList = [];
+                    renderProblems();
+                }
+            }
+            renderEditorTabs();
+            loadTree();
         }
         function closeEditorTab(path){
             const idx = openTabs.indexOf(path);
@@ -2789,7 +2853,9 @@
             document.querySelectorAll('.tree-item').forEach(el=>el.classList.remove('active'));
             if(rowEl) rowEl.classList.add('active');
             if(currentFile && currentFile !== path){
+                clearTimeout(saveTimer);
                 fileContentCache[currentFile] = getEditorContent();
+                if(dirtySet.has(currentFile)) persistFile(currentFile);
                 socket.emit('leave', { path: currentFile });
                 socket.emit('run_stop', {});
             }
@@ -2809,7 +2875,7 @@
                     setEditorContent('');
                     editorHost.style.display = 'none';
                     emptyState.style.display = 'flex';
-                    emptyState.innerHTML = `<img src="${data.url}" style="max-width:100%;max-height:100%;" />`;
+                    emptyState.innerHTML = `<img src="${encodeURI(data.url)}" style="max-width:100%;max-height:100%;" alt="preview" />`;
                     btnPanel.disabled = true; btnFre.disabled = true; btnExport.disabled = true; btnBackup.disabled = true;
                     return;
                 }
@@ -2919,7 +2985,8 @@
                 markDirty(currentFile);
                 btnBackup.disabled = false;
                 clearTimeout(saveTimer);
-                saveTimer = setTimeout(() => saveFile(true), 1500);
+                const freSavePath = currentFile;
+                saveTimer = setTimeout(() => persistFile(freSavePath), 1500);
             }
         }
         btnFre.addEventListener('click', toggleFre);
@@ -3173,7 +3240,9 @@
             if(!newName || newName===item.name) return;
             const parts = item.path.split('/'); parts[parts.length-1]=newName; const newPath=parts.join('/');
             const res = await fetch('/api/rename', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({old:item.path, new:newPath}) });
-            if(res.ok){ if(currentFile===item.path){ currentFile=newPath; filepathEl.textContent=newPath; } showToast('重命名成功','success'); loadTree(); }
+            // 不在本地直接改 currentFile: 服务器会向旧 room 广播 file_renamed,
+            // 统一由该事件完成 leave/join/缓存迁移, 避免本地先改导致广播分支被跳过、协同失效
+            if(res.ok){ showToast('重命名成功','success'); loadTree(); }
             else{ const err=await res.json(); showToast(err.error||'重命名失败','error'); }
         }
         async function deleteItem(item){
@@ -3318,6 +3387,7 @@
         });
 
         // ===================== CPH 测试点管理 =====================
+        let cphLoadSeq = 0;   // 请求序号: 快速切换文件时丢弃旧响应, 防止面板显示错位数据
         async function loadCPH(path){
             if(!path || !JUDGEABLE_EXTS.includes(extOf(path))){
                 cphTestCases = [];
@@ -3332,9 +3402,12 @@
             cphSaveAll.disabled = false;
             cphRunAll.disabled = false;
             cphZip.disabled = false;
+            const seq = ++cphLoadSeq;
             try{
                 const res = await fetch('/api/tests?path=' + encodeURIComponent(path));
-                cphTestCases = await res.json();
+                const tests = await res.json();
+                if(seq !== cphLoadSeq || path !== currentFile) return;  // 已切换到其他文件, 丢弃
+                cphTestCases = tests;
                 // 从 name "test N" 中提取编号
                 cphTestCases.forEach(tc => {
                     const m = tc.name.match(/(\d+)/);
@@ -3343,6 +3416,7 @@
                 cphTestCases.sort((a,b) => a.num - b.num);
                 renderCPH();
             }catch(e){
+                if(seq !== cphLoadSeq || path !== currentFile) return;
                 cphTestCases = [];
                 renderCPH();
             }
@@ -3449,7 +3523,7 @@
                 let html = `<div class="tc-num">#${tc.num}</div>`;
                 html += `<div class="tc-io"><label>Input</label><textarea class="tc-input" rows="2">${escapeHtml(tc.input || '')}</textarea></div>`;
                 html += `<div class="tc-io"><label>Expected</label><textarea class="tc-expected" rows="2">${escapeHtml(tc.expected || '')}</textarea></div>`;
-                html += `<div class="tc-verdict ${vClass}">${tc.verdict || '—'}</div>`;
+                html += `<div class="tc-verdict ${vClass}">${escapeHtml(tc.verdict || '—')}</div>`;
                 html += `<div class="tc-time">${tc.time_ms ? tc.time_ms + 'ms' : '—'}<span class="tc-mem">${tc.mem_kb ? (tc.mem_kb >= 1024 ? (tc.mem_kb/1024).toFixed(1)+'MB' : tc.mem_kb+'KB') : ''}</span></div>`;
                 html += `<div class="tc-actions">`;
                 html += `<button class="run" title="运行此测试点">▶</button>`;
@@ -3491,41 +3565,53 @@
         }
 
         async function runSingleCPH(num){
-            if(!currentFile) return;
+            if(!currentFile || cphRunning) return;
             syncCPHFromDOM();
             const tc = cphTestCases.find(t => t.num === num);
             if(!tc) return;
-            // 先把当前编辑值落盘,再运行,避免服务器读到空文件
-            await saveCPHField(num, 'in', tc.input || '');
-            await saveCPHField(num, 'out', tc.expected || '');
-            tc.verdict = '...';
-            tc.actual = undefined;
-            tc.stderr = undefined;
-            tc.time_ms = 0;
-            renderCPH();
+            cphRunning = true;
             try{
-                const res = await fetch('/api/test/run', {
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ path: currentFile, num: num })
-                });
-                const result = await res.json();
-                // 仅合并评测结果,不覆盖本地 input/expected
-                tc.verdict = result.verdict;
-                tc.actual = result.actual;
-                tc.stderr = result.stderr;
-                tc.time_ms = result.time_ms;
-                tc.mem_kb = result.mem_kb;
+                // 先把当前编辑值落盘,再运行,避免服务器读到空文件
+                await saveCPHField(num, 'in', tc.input || '');
+                await saveCPHField(num, 'out', tc.expected || '');
+                tc.verdict = '...';
+                tc.actual = undefined;
+                tc.stderr = undefined;
+                tc.time_ms = 0;
                 renderCPH();
-            }catch(e){
-                tc.verdict = 'RE';
-                tc.stderr = '请求失败';
-                renderCPH();
+                try{
+                    const res = await fetch('/api/test/run', {
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({ path: currentFile, num: num })
+                    });
+                    const result = await res.json();
+                    // 仅合并评测结果,不覆盖本地 input/expected
+                    tc.verdict = result.verdict;
+                    tc.actual = result.actual;
+                    tc.stderr = result.stderr;
+                    tc.time_ms = result.time_ms;
+                    tc.mem_kb = result.mem_kb;
+                    renderCPH();
+                }catch(e){
+                    tc.verdict = 'RE';
+                    tc.stderr = '请求失败';
+                    renderCPH();
+                }
+            } finally {
+                cphRunning = false;
             }
         }
 
+        let cphRunning = false;   // 防重入: 连点"运行"时避免并发评测交错渲染
         async function runAllCPH(){
-            if(!currentFile || cphTestCases.length === 0) return;
+            if(!currentFile || cphTestCases.length === 0 || cphRunning) return;
+            cphRunning = true;
+            try{
+            await runAllCPHInner();
+            } finally { cphRunning = false; }
+        }
+        async function runAllCPHInner(){
             syncCPHFromDOM();
             judgeVerdict.textContent = '…';
             judgeVerdict.className = 'v-pending';
@@ -3810,5 +3896,4 @@
         init();
     </script>
 </body>
-</html>
 </html>

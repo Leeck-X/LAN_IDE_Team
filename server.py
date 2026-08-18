@@ -112,7 +112,10 @@ def get_mime(full_path):
 def normalize_newlines(text):
     return text.replace('\r\n', '\n').replace('\r', '\n')
 
-def scan_dir(path=""):
+def scan_dir(path="", depth=0):
+    # 深度上限: 防 symlink 环导致无限递归爆栈
+    if depth > 16:
+        return []
     root = safe_path(path)
     items = []
     for name in sorted(os.listdir(root)):
@@ -125,7 +128,7 @@ def scan_dir(path=""):
                 "name": name,
                 "path": rel,
                 "type": "folder",
-                "children": scan_dir(rel)
+                "children": scan_dir(rel, depth + 1)
             })
         else:
             items.append({"name": name, "path": rel, "type": "file"})
@@ -228,6 +231,29 @@ def warmup_pch():
     if compiler:
         ensure_pch(compiler)
 
+def _safe_remove(path):
+    """删除文件, 忽略不存在/占用等异常(用于临时产物清理)。"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+COMPILE_CACHE_MAX_ENTRIES = 200  # 缓存的 exe 数量上限, 超出按最旧淘汰
+
+def cleanup_compile_cache():
+    """编译缓存容量控制: 超出上限时按修改时间淘汰最旧的条目。"""
+    try:
+        entries = [os.path.join(COMPILE_CACHE_DIR, n) for n in os.listdir(COMPILE_CACHE_DIR)
+                   if not n.startswith("pch")]
+        if len(entries) <= COMPILE_CACHE_MAX_ENTRIES:
+            return
+        entries.sort(key=lambda p: os.path.getmtime(p))
+        for p in entries[:len(entries) - COMPILE_CACHE_MAX_ENTRIES]:
+            _safe_remove(p)
+    except OSError:
+        pass
+
 def compile_source(src_path, ext, work_dir):
     if ext == "c":
         compiler = cached_compiler("c")
@@ -262,6 +288,9 @@ def compile_source(src_path, ext, work_dir):
         if os.path.exists(cached_exe):
             return [cached_exe], None
         last_err = "编译失败"
+        # 先编译到临时文件, 成功后 os.replace 原子进缓存:
+        # 若直接 -o 缓存路径, 超时被 kill 时会留下半成品 exe, 之后同源码永远命中损坏缓存
+        tmp_exe = cached_exe + ".tmp" + str(os.getpid()) + "-" + str(threading.get_ident())
         for i, s in enumerate(stds):
             cmd = [compiler]
             if s:
@@ -269,14 +298,22 @@ def compile_source(src_path, ext, work_dir):
             # c++17 且 PCH 就绪时用预编译头加速; -pipe 减少磁盘 I/O, 关闭诊断颜色
             if s == "c++17" and pch_hdr:
                 cmd += ["-include", pch_hdr]
-            cmd += ["-O2", "-pipe", "-fdiagnostics-color=never", "-Wall", "-Wextra", "-o", cached_exe, src_path]
+            cmd += ["-O2", "-pipe", "-fdiagnostics-color=never", "-Wall", "-Wextra", "-o", tmp_exe, src_path]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=COMPILE_TIMEOUT)
             except subprocess.TimeoutExpired:
+                _safe_remove(tmp_exe)
                 return None, "编译超时"
             if proc.returncode == 0:
+                try:
+                    os.replace(tmp_exe, cached_exe)
+                except OSError:
+                    _safe_remove(tmp_exe)
+                    return None, "缓存写入失败"
+                cleanup_compile_cache()
                 return [cached_exe], None
             last_err = proc.stderr or proc.stdout or "编译失败"
+            _safe_remove(tmp_exe)
             # 仅当错误像「需要更新标准/标准不支持」时才尝试下一个标准, 语法错误不重复编译
             if s and i < len(stds) - 1:
                 err_lower = last_err.lower()
@@ -371,10 +408,8 @@ def run_process_with_stats(cmd, stdin_data="", timeout=RUN_TIMEOUT, cwd=None,
     }
 
     def _kill():
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        # 评测路径同样需要杀进程树, 防止被测程序 spawn 的子进程逃过超时 kill
+        _kill_tree(proc)
 
     def monitor():
         if psutil is None:
@@ -1052,6 +1087,23 @@ def get_doc_content(rel):
             d["content"] = content
         return d["content"], d["version"]
 
+def _flush_and_evict_doc(rel):
+    """最后一个用户离开时: 在 docs_lock 内把权威内容落盘后移除缓存。
+    必须在锁内完成「读缓存→写盘→pop」, 否则并发的 join 会在 pop 与写盘之间
+    读到旧磁盘内容重新入缓存, 导致前一位用户的最后编辑被覆盖丢失。"""
+    with docs_lock:
+        d = docs.get(rel)
+        if d is None or d.get("content") is None:
+            return
+        try:
+            full = safe_path(rel)
+            os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
+            with open(full, "w", encoding="utf-8", newline="\n") as f:
+                f.write(d["content"])
+        except Exception:
+            return  # 写盘失败保留缓存, 待下次尝试, 不丢内容
+        docs.pop(rel, None)
+
 # ---------- 交互式运行 ----------
 RUN_MAX_SECONDS = 300
 CONSOLE_RUN_TIMEOUT = 4  # 控制台「运行」的时间上限(秒), 超时判 TLE
@@ -1067,21 +1119,42 @@ def cleanup_console(sid):
         if entry.get("workdir"):
             entry["workdir"].cleanup()
 
+def _kill_tree(proc):
+    """杀掉整个进程树(含子进程), 防止被评测程序 spawn 的孙进程逃过 kill 继续占用资源。"""
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=5)
+        else:
+            if psutil is not None:
+                try:
+                    p = psutil.Process(proc.pid)
+                    for c in p.children(recursive=True):
+                        try:
+                            c.kill()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 def kill_console(sid):
     with running_consoles_lock:
         entry = running_consoles.get(sid)
     if entry and entry["proc"].poll() is None:
-        try:
-            entry["proc"].kill()
-        except:
-            pass
+        _kill_tree(entry["proc"])
 
 def run_process_streaming(cmd, stdin_data="", timeout=CONSOLE_RUN_TIMEOUT, cwd=None,
                           mem_limit_mb=MEM_LIMIT_MB, output_limit=OUTPUT_LIMIT,
-                          on_output=None, on_proc=None):
+                          on_output=None, on_proc=None, keep_stdin=False):
     """流式运行程序: 每读到一块输出立即回调 on_output, 同时统计峰值内存/时间/输出大小。
-    超出时间→TLE、内存→MLE、输出→OLE。stdin 喂入后立即关闭(EOF), 与 OJ 行为一致。
-    on_proc(proc) 在进程启动成功后回调一次(用于外部停止)。"""
+    超出时间→TLE、内存→MLE、输出→OLE。stdin 喂入后默认立即关闭(EOF), 与 OJ 行为一致;
+    keep_stdin=True 时保持 stdin 打开, 供控制台交互式运行后续追加输入。"""
     start = time.perf_counter()
     try:
         proc = subprocess.Popen(
@@ -1101,10 +1174,7 @@ def run_process_streaming(cmd, stdin_data="", timeout=CONSOLE_RUN_TIMEOUT, cwd=N
     state = {"peak": 0, "over_mem": False, "over_out": False, "over_time": False, "out_size": 0}
 
     def _kill():
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_tree(proc)
 
     def monitor():
         if psutil is None:
@@ -1135,7 +1205,10 @@ def run_process_streaming(cmd, stdin_data="", timeout=CONSOLE_RUN_TIMEOUT, cwd=N
         try:
             if stdin_data:
                 proc.stdin.write(stdin_data)
-            proc.stdin.close()
+            # keep_stdin 模式下不关闭 stdin, 否则控制台的 run_input 交互输入
+            # 会写入已关闭的管道而静默失败(程序读到 EOF, 交互功能整体失效)
+            if not keep_stdin:
+                proc.stdin.close()
         except Exception:
             pass
 
@@ -1210,11 +1283,12 @@ def api_read():
 
     if is_binary_file(full):
         mime = get_mime(full)
+        from urllib.parse import quote
         return jsonify({
             "binary": True,
             "mime": mime,
             "content": None,
-            "url": f"/api/file/raw?path={path}"
+            "url": f"/api/file/raw?path={quote(path)}"
         })
 
     with open(full, "r", encoding="utf-8", errors="ignore", newline="\n") as f:
@@ -1261,8 +1335,10 @@ def api_save():
                 d["version"] += 1
                 append_history(d, op)
                 broadcast = {"path": path, "op": op.to_json(), "version": d["version"]}
-    if broadcast:
-        socketio.emit("edit", broadcast, room=path)
+                # 与 on_edit 一致: 广播必须在 docs_lock 内, 保证同一文件的
+                # edit 事件严格按版本号顺序到达客户端, 避免锁外并发乱序触发误 resync
+                if broadcast:
+                    socketio.emit("edit", broadcast, room=path)
     return jsonify({"ok": True})
 
 @app.route("/api/backup", methods=["POST"])
@@ -1285,10 +1361,11 @@ def api_backup():
             return jsonify({"ok": False, "error": "文件不存在"}), 404
 
         client_ip = request.remote_addr or "127.0.0.1"
-        last_ip = client_ip.split(".")[-1] if "." in client_ip else client_ip
+        # 用 IP 摘要做后缀: IPv6 地址含冒号, 直接拼进文件名在 Windows 上非法
+        ip_tag = client_ip.split(".")[-1] if re.fullmatch(r"[\d.]+", client_ip) else hashlib.sha256(client_ip.encode()).hexdigest()[:8]
 
         base_name = os.path.basename(full)
-        backup_name = f"{base_name}_{last_ip}.bak"
+        backup_name = f"{base_name}_{ip_tag}.bak"
         backup_path = os.path.join(os.path.dirname(full), backup_name)
 
         os.makedirs(os.path.dirname(backup_path), exist_ok=True)
@@ -1341,14 +1418,16 @@ def api_rename():
     if os.path.exists(new_full):
         return jsonify({"error": "目标已存在"}), 400
     os.makedirs(os.path.dirname(new_full), exist_ok=True)
-    os.rename(old_full, new_full)
-    with presence_lock:
-        if old in presence:
-            presence[new] = presence.pop(old)
-    # 迁移 OT 权威缓存到新路径, 避免旧路径缓存把已改名的文件写回来
+    # 磁盘改名与 docs/presence 迁移必须在同一临界区, 否则窗口内其他客户端
+    # 保存旧路径会把已改名的文件用旧内容重建出来(同一文件新旧两份并存)。
+    # 锁顺序统一为 docs_lock -> presence_lock, 与 /api/delete 保持一致避免死锁。
     with docs_lock:
+        os.rename(old_full, new_full)
         if old in docs:
             docs[new] = docs.pop(old)
+        with presence_lock:
+            if old in presence:
+                presence[new] = presence.pop(old)
     # 先在旧 room 广播,让客户端更新 currentFile 并重新 join 新 room
     socketio.emit("file_renamed", {"old_path": old, "new_path": new}, room=old)
     socketio.emit('tree_changed', {})
@@ -1371,11 +1450,23 @@ def api_delete():
     else:
         os.remove(full)
     # 清理 OT 权威缓存(含目录下所有子文件), 否则残留缓存会在保存时重建已删除文件
+    deleted_docs = []
     with docs_lock:
-        docs.pop(path, None)
+        if path in docs:
+            deleted_docs.append(path)
+            docs.pop(path, None)
         prefix = path.rstrip("/") + "/"
         for k in [k for k in docs if k.startswith(prefix)]:
+            deleted_docs.append(k)
             docs.pop(k, None)
+    # 同步清理 presence, 避免残留
+    with presence_lock:
+        presence.pop(path, None)
+        for k in [k for k in presence if k.startswith(prefix)]:
+            presence.pop(k, None)
+    # 通知正在编辑被删文件的客户端立即停止编辑, 防止后续 edit/save 把文件"复活"
+    for p in deleted_docs:
+        socketio.emit('file_deleted', {"path": p}, room=p)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True})
 
@@ -1385,10 +1476,15 @@ def api_upload():
         return jsonify({"error": "没有文件"}), 400
     file = request.files["file"]
     filename = os.path.basename(file.filename)
+    # basename 后仍需校验(防 ".." / NTFS 备用数据流冒号等异常文件名)
+    if not filename or filename in (".", "..") or ":" in filename or filename != filename.strip():
+        return jsonify({"error": "非法文件名"}), 400
     save_path = os.path.join(WORKSPACE, filename)
     file.save(save_path)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True, "name": filename})
+
+MAX_ZIP_MEMBER_SIZE = 10 * 1024 * 1024  # 测试点单文件解压上限(防 zip 炸弹)
 
 @app.route("/api/upload_tests", methods=["POST"])
 def api_upload_tests():
@@ -1457,9 +1553,15 @@ def api_upload_tests():
             for num, files in pairs.items():
                 new_num = remap[num]
                 for ext, name in files.items():
+                    # 单文件大小上限, 防 zip 炸弹(声明大小异常或解压超限直接拒绝)
+                    info = zf.getinfo(name)
+                    if info.file_size > 10 * 1024 * 1024:
+                        return jsonify({"error": f"测试点文件过大: {os.path.basename(name)}"}), 400
                     dest = os.path.join(test_dir, f"{new_num}.{ext}")
                     with zf.open(name) as src, open(dest, 'wb') as dst:
-                        dst.write(src.read())
+                        dst.write(src.read(MAX_ZIP_MEMBER_SIZE + 1))
+                        if dst.tell() > MAX_ZIP_MEMBER_SIZE:
+                            return jsonify({"error": f"测试点文件过大: {os.path.basename(name)}"}), 400
                     count += 1
     except zipfile.BadZipFile:
         return jsonify({"error": "无效的 zip 文件"}), 400
@@ -1499,9 +1601,16 @@ def api_export_tests():
             download_name=f"{base_name}_tests.zip"
         )
     finally:
-        # 延迟清理(send_from_directory 需要文件存在)
-        import atexit
-        atexit.register(lambda: os.path.exists(tmp_zip.name) and os.unlink(tmp_zip.name))
+        # 延迟清理(send_from_directory 需要文件存在); 用定时线程而非 atexit,
+        # 避免频繁导出时临时 zip 累积到进程退出才释放
+        def _delayed_unlink(p=tmp_zip.name):
+            time.sleep(60)
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+        threading.Thread(target=_delayed_unlink, daemon=True).start()
 
 # ---------- CPH 测试点管理 ----------
 @app.route("/api/tests")
@@ -1549,6 +1658,9 @@ def api_test_delete():
     data = request.get_json(force=True)
     source_path = data.get("path", "")
     test_num = data.get("num")
+    # num 必须是纯数字, 防止 "../xxx" 之类路径注入逃逸测试目录删任意文件
+    if not re.fullmatch(r"\d+", str(test_num if test_num is not None else "")):
+        return jsonify({"error": "非法测试点编号"}), 400
     try:
         full = safe_path(source_path)
     except ValueError:
@@ -1666,6 +1778,9 @@ def api_test_run():
     data = request.get_json(force=True)
     path = data.get("path", "")
     test_num = data.get("num")
+    # num 必须是纯数字, 防止路径注入读取测试目录外文件
+    if not re.fullmatch(r"\d+", str(test_num if test_num is not None else "")):
+        return jsonify({"error": "非法测试点编号"}), 400
     try:
         full = safe_path(path)
     except ValueError:
@@ -1838,7 +1953,8 @@ def on_join(data):
     with presence_lock:
         presence.setdefault(rel, {})[request.sid] = username
         users = list(presence[rel].values())
-    emit("presence", {"path": rel, "users": users}, room=rel)
+        sids = list(presence[rel].keys())
+    emit("presence", {"path": rel, "users": users, "sids": sids}, room=rel)
     # 推送当前权威内容与版本号, 确保新加入者/重连者立即拿到最新文档, 而不是过时的磁盘快照
     content, version = get_doc_content(rel)
     print(f"[join] sid={request.sid} path={rel} v={version} len={len(content)}")
@@ -1854,31 +1970,31 @@ def on_leave(data):
         if rel in presence and request.sid in presence[rel]:
             del presence[rel][request.sid]
             users = list(presence[rel].values())
+            sids = list(presence[rel].keys())
             empty = not presence[rel]
         else:
             users = []
+            sids = []
             empty = False
     if empty:
-        with docs_lock:
-            d = docs.pop(rel, None)
-        # 最后一个用户离开时, 把权威内容落盘, 保证磁盘始终是最新的
-        if d is not None and d.get("content") is not None:
-            try:
-                full = safe_path(rel)
-                os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
-                with open(full, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(d["content"])
-            except Exception:
-                pass
-    emit("presence", {"path": rel, "users": users}, room=rel)
+        # 最后一个用户离开时, 把权威内容落盘后淘汰缓存, 保证磁盘始终是最新的
+        _flush_and_evict_doc(rel)
+    emit("presence", {"path": rel, "users": users, "sids": sids}, room=rel)
 
 @socketio.on("disconnect")
 def on_disconnect():
+    emptied = []
     with presence_lock:
         for rel, users in list(presence.items()):
             if request.sid in users:
                 del users[request.sid]
-                emit("presence", {"path": rel, "users": list(users.values())}, room=rel)
+                emit("presence", {"path": rel, "users": list(users.values()), "sids": list(users.keys())}, room=rel)
+                if not users:
+                    emptied.append(rel)
+    # 用户是最后在线者的文件: 落盘并淘汰缓存,
+    # 避免直接关浏览器(不发 leave)时未保存编辑随进程退出丢失、docs 只增不减
+    for rel in emptied:
+        _flush_and_evict_doc(rel)
     kill_console(request.sid)
     cleanup_console(request.sid)
 
@@ -1902,7 +2018,11 @@ def on_edit(data):
                 with open(full, "r", encoding="utf-8", errors="ignore", newline="\n") as f:
                     d["content"] = normalize_newlines(f.read())
             except Exception:
-                d["content"] = ""
+                # 磁盘上不存在该文件(正常流程新建文件都会先落盘, 走到这里说明文件已被删除):
+                # 拒绝编辑并回滚本次 setdefault 的空缓存, 防止后续保存把已删文件"复活"为空文件
+                if docs.get(rel) is d:
+                    docs.pop(rel, None)
+                return {"version": None, "deleted": True}
         content = d["content"]
         version = d["version"]
         history = d["history"]
@@ -1944,8 +2064,14 @@ def on_edit(data):
             if base < history_start or version - base > len(history):
                 print(f"[edit] resync: base={base} < history_start={history_start} or gap>history (v={version}, h={len(history)})")
                 return {"version": None, "resync": True}
-            for past in history[base - history_start:]:
-                op, _ = TextOperation.transform(op, past)
+            try:
+                for past in history[base - history_start:]:
+                    op, _ = TextOperation.transform(op, past)
+            except ValueError as _te:
+                # transform 与 apply 一样可能因 op 与 base 版本长度不符抛 ValueError,
+                # 必须捕获并返回 resync, 否则 handler 崩溃且客户端永远收不到 ack
+                print(f"[edit] resync: transform failed base={base} version={version} err={_te}")
+                return {"version": None, "resync": True}
 
         try:
             new_content = op.apply(content)
@@ -1959,7 +2085,14 @@ def on_edit(data):
         final_version = d["version"]
         op_json = op.to_json()
 
-    emit("edit", {"path": rel, "op": op_json, "version": final_version}, room=rel, include_self=False)
+        # 广播必须在 docs_lock 内、版本号写入后立即发生, 且早于本函数向发送者返回 ack。
+        # 若放到锁外, threading async_mode 下并发的另一个 on_edit 线程可能先完成
+        # 自己的加锁->广播->返回, 导致同一文件的多个 edit 广播/ack 在网络层乱序到达
+        # 客户端, 使客户端的 otDrain() 长时间等不到 otRevision+1 而触发 resyncDoc(),
+        # 把编辑器错误地切换为只读(即“先编辑者被顶成只读, 新加入者反而能写”的 bug)。
+        # 在锁内广播可以保证同一文件的所有 edit 事件严格按版本号顺序发出。
+        emit("edit", {"path": rel, "op": op_json, "version": final_version}, room=rel, include_self=False)
+
     return {"version": final_version, "op": op_json, "clamped": clamped, "resync": False}
 
 @socketio.on("cursor")
@@ -1998,6 +2131,11 @@ def on_save(data):
         if d is not None and d.get("content") is not None:
             content = d["content"]
         else:
+            # 权威缓存不在(可能刚被 /api/delete 清理): 仅当磁盘文件仍存在时才兜底写盘,
+            # 避免用客户端内容把已删除的文件重建出来
+            if not os.path.exists(full):
+                emit("file_deleted", {"path": rel}, room=request.sid)
+                return
             content = client_content
     try:
         os.makedirs(os.path.dirname(full) or WORKSPACE, exist_ok=True)
@@ -2138,7 +2276,7 @@ def on_run_start(data):
         result = run_process_streaming(
             run_cmd, stdin_data, timeout=CONSOLE_RUN_TIMEOUT, cwd=source_dir,
             mem_limit_mb=MEM_LIMIT_MB, output_limit=OUTPUT_LIMIT,
-            on_output=on_output, on_proc=on_proc
+            on_output=on_output, on_proc=on_proc, keep_stdin=True
         )
         verdict = result.get("error")
         if verdict:

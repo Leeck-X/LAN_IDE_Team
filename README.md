@@ -79,12 +79,14 @@ workspace/
     └── 2.out
 ```
 
-## 致谢
-
-本次代码提交与推送工作流由 **trae-remote-official:github** 插件协助完成（仓库分支管理、提交与推送到 `https://github.com/Leeck-X/LAN_IDE_Team`）。
-
 ## 近期修复与优化
 
+- **编译缓存原子化**：编译先写临时 exe 再 `os.replace` 进缓存，避免超时 kill 留下半成品导致同源码永久命中损坏缓存；缓存满 200 条自动淘汰最旧
+- **进程树超时杀**：运行/评测超时改用 `taskkill /T /F`（Windows）/ psutil 递归杀子进程，防止被测程序 spawn 的孙进程逃过 kill 继续占资源
+- **OT 文档内存释放**：房间最后一个用户离开时落盘后清除权威缓存，避免长期空闲文件堆积占内存
+- **目录扫描深度限**：`scan_dir` 加 16 层上限，防 symlink 环导致递归爆栈
+- **CPH 全部运行**：评测面板支持一键跑全部测试点
+- **测试点 verdict 展示**：每个测试点显示通过/失败标记
 - **协同编辑健壮性**：`on_edit` 的 history 裁剪后索引错位（超过 2000 次编辑后 transform 用错操作序列导致内容错乱）——引入 `history_start` 记录窗口偏移并换算下标
 - **换行符统一**：`api_read`、`get_doc_content`、`on_edit` 加载磁盘文件统一调用 `normalize_newlines`，消除 HTTP 读取到 CRLF 与 OT 内存中 LF 的长度不一致（曾导致编辑被服务端拒绝→内容回滚→光标跳到左上角的故障）
 - **断线重连自动重新对齐**：socket `connect` 时触发 `resyncDoc()`，避免重连后用失效版本号继续编辑必然触发 resync 覆盖

@@ -10,8 +10,7 @@ static/monaco/
 clangd-windows.zip
 
 # 本地打包成 exe 的工具与产物(仅本地保留, 不上传)
-LAN_IDE_Serve.spec
-LAN_IDE.spec
+*.spec
 LAN_IDE_Serve.exe
 LAN_IDE_Serve_Setup.exe
 _internal/
@@ -19,6 +18,8 @@ build_exe.bat
 build/
 dist/
 *.manifest
+static/logo.ico
+LAN_IDE_Team-fixed.zip
 
 # 系统/编辑器
 .DS_Store
