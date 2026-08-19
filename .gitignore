@@ -3,6 +3,7 @@ workspace/
 __pycache__/
 *.pyc
 .compile_cache/
+users.json
 
 # 依赖工具(体积大, 用 setup_environment.bat 或官网获取)
 tools/
