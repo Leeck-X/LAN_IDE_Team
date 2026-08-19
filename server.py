@@ -840,6 +840,12 @@ presence_lock = threading.RLock()
 #   持久化到 BASE_DIR/users.json, 以 IP 为 key(同一台机子换浏览器/换名字统计仍累计)
 clients = {}
 clients_lock = threading.RLock()
+
+# ---------- 全局在线用户(跨房间) ----------
+# global_users: sid -> {"name", "ip", "device", "current_file", "last_active"}
+global_users = {}
+global_users_lock = threading.RLock()
+
 USERS_DB = os.path.join(BASE_DIR, "users.json")
 user_store = {}
 user_store_lock = threading.Lock()
@@ -1016,6 +1022,34 @@ def build_presence(rel):
             "admin": is_admin_ip(ip),
         })
     return {"path": rel, "users": users, "sids": list(sids.keys())}
+
+def _broadcast_global_presence():
+    """向所有连接广播全局在线用户列表(跨房间), 前端据此渲染左下角在线用户。"""
+    now = int(time.time() * 1000)
+    users = []
+    with global_users_lock:
+        for sid, info in global_users.items():
+            users.append({
+                "sid": sid,
+                "name": info.get("name", "匿名"),
+                "device": info.get("device", ""),
+                "ip_tail": ip_tail(info.get("ip", "")),
+                "admin": is_admin_ip(info.get("ip", "")),
+                "readonly": is_readonly_ip(info.get("ip", "")),
+                "current_file": info.get("current_file", ""),
+                "last_active": info.get("last_active", now),
+            })
+    socketio.emit("presence", {"users": users})
+
+def _presence_loop():
+    while True:
+        time.sleep(2)
+        try:
+            _broadcast_global_presence()
+        except Exception:
+            pass
+
+threading.Thread(target=_presence_loop, daemon=True).start()
 
 # ---------- OT 操作 (移植 ot.js TextOperation) ----------
 class TextOperation:
@@ -1523,18 +1557,12 @@ def api_admin_readonly():
     if is_admin_ip(ip):
         return jsonify({"error": "不能对服务器本机设置只读"}), 400
     user_store_set(ip, save_now=True, readonly=flag)
-    # 实时通知目标的所有连接, 并刷新其所在房间的 presence 展示
-    rooms = set()
-    with presence_lock:
-        with clients_lock:
-            for sid, c in clients.items():
-                if c.get("ip") == ip:
-                    socketio.emit("readonly_changed", {"readonly": flag}, room=sid)
-            for rel, users in presence.items():
-                if any(clients.get(sid, {}).get("ip") == ip for sid in users):
-                    rooms.add(rel)
-    for rel in rooms:
-        socketio.emit("presence", build_presence(rel), room=rel)
+    # 实时通知目标的所有连接, 并刷新全局 presence 展示
+    with clients_lock:
+        for sid, c in clients.items():
+            if c.get("ip") == ip:
+                socketio.emit("readonly_changed", {"readonly": flag}, room=sid)
+    _broadcast_global_presence()
     return jsonify({"ok": True})
 
 @app.route("/api/tree")
@@ -1673,6 +1701,7 @@ def api_create():
     data = request.get_json(force=True)
     path = data.get("path", "")
     is_folder = data.get("folder", False)
+    content = data.get("content", "")
     try:
         full = safe_path(path)
     except ValueError:
@@ -1683,7 +1712,8 @@ def api_create():
         os.makedirs(full, exist_ok=True)
     else:
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        open(full, "w", encoding="utf-8", newline="\n").close()
+        with open(full, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content if isinstance(content, str) else "")
     stat_add(client_ip(), creates=1)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True})
@@ -2245,6 +2275,50 @@ def api_judge():
                 final = r["verdict"]
     return jsonify({"verdict": final, "cases": results})
 
+# ---------- 文件模板管理 ----------
+TEMPLATES_FILE = os.path.join(BASE_DIR, "templates.json")
+
+def _load_templates():
+    try:
+        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_templates(templates):
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(templates, f, indent=2, ensure_ascii=False)
+
+@app.route("/api/templates", methods=["GET"])
+def api_templates_get():
+    return jsonify(_load_templates())
+
+@app.route("/api/templates/<ext>", methods=["GET"])
+def api_template_get(ext):
+    templates = _load_templates()
+    return jsonify(templates.get(ext, ""))
+
+@app.route("/api/templates/<ext>", methods=["PUT"])
+def api_template_put(ext):
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式"}), 403
+    data = request.get_json(force=True)
+    content = data.get("content", "")
+    templates = _load_templates()
+    templates[ext] = content
+    _save_templates(templates)
+    return jsonify({"ok": True})
+
+@app.route("/api/templates/<ext>", methods=["DELETE"])
+def api_template_delete(ext):
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式"}), 403
+    templates = _load_templates()
+    if ext in templates:
+        del templates[ext]
+        _save_templates(templates)
+    return jsonify({"ok": True})
+
 # ---------- Socket.IO 事件 ----------
 @socketio.on("join")
 def on_join(data):
@@ -2262,7 +2336,16 @@ def on_join(data):
         presence.setdefault(rel, {})[request.sid] = username
         with clients_lock:
             clients[request.sid] = {"ip": ip, "name": username, "device": device}
-    emit("presence", build_presence(rel), room=rel)
+    # 更新全局在线用户并广播(跨房间, 前端左下角列表)
+    with global_users_lock:
+        global_users[request.sid] = {
+            "name": username,
+            "ip": ip,
+            "device": device,
+            "current_file": rel,
+            "last_active": int(time.time() * 1000),
+        }
+    _broadcast_global_presence()
     # 记录该 IP 最近使用的名字, 供管理员查看用户数据
     user_store_set(ip, name=username)
     # 推送当前权威内容与版本号, 确保新加入者/重连者立即拿到最新文档, 而不是过时的磁盘快照
@@ -2287,8 +2370,10 @@ def on_rename(data):
             if request.sid in clients:
                 clients[request.sid]["name"] = name
                 ip = clients[request.sid].get("ip", "")
-    for rel in rooms:
-        emit("presence", build_presence(rel), room=rel)
+    with global_users_lock:
+        if request.sid in global_users:
+            global_users[request.sid]["name"] = name
+    _broadcast_global_presence()
     if ip:
         user_store_set(ip, name=name)
 
@@ -2306,7 +2391,7 @@ def on_leave(data):
     if empty:
         # 最后一个用户离开时, 把权威内容落盘后淘汰缓存, 保证磁盘始终是最新的
         _flush_and_evict_doc(rel)
-    emit("presence", build_presence(rel), room=rel)
+    # 全局 presence 由周期广播 + 加入/离开/改名事件统一推送, 房间内广播已废弃
 
 @socketio.on("disconnect")
 def on_disconnect():
@@ -2325,8 +2410,9 @@ def on_disconnect():
     # 避免直接关浏览器(不发 leave)时未保存编辑随进程退出丢失、docs 只增不减
     for rel in emptied:
         _flush_and_evict_doc(rel)
-    for rel in rooms:
-        emit("presence", build_presence(rel), room=rel)
+    with global_users_lock:
+        global_users.pop(request.sid, None)
+    _broadcast_global_presence()
     kill_console(request.sid)
     cleanup_console(request.sid)
 
@@ -2454,6 +2540,11 @@ def on_cursor(data):
     data["sid"] = request.sid
     with presence_lock:
         data["username"] = presence.get(rel, {}).get(request.sid, "匿名")
+    # 更新全局在线用户的活跃时间与当前文件(由周期性广播推送给前端)
+    with global_users_lock:
+        if request.sid in global_users:
+            global_users[request.sid]["last_active"] = int(time.time() * 1000)
+            global_users[request.sid]["current_file"] = rel
     emit("cursor", data, room=rel, include_self=False)
 
 @socketio.on("save")

@@ -1,0 +1,35 @@
+# 运行时数据
+workspace/
+__pycache__/
+*.pyc
+.compile_cache/
+
+# 依赖工具(体积大, 用 setup_environment.bat 或官网获取)
+tools/
+static/monaco/
+clangd-windows.zip
+
+# 本地打包成 exe 的工具与产物(仅本地保留, 不上传)
+*.spec
+LAN_IDE_Serve.exe
+LAN_IDE_Serve_Setup.exe
+_internal/
+build_exe.bat
+build/
+dist/
+*.manifest
+static/logo.ico
+LAN_IDE_Team-fixed.zip
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 临时调试/生成脚本(不入库)
+gen_logo.py
+_ot_smoke_test.py
+_check_scripts.js
+_verify.js
+*_ot_test.*

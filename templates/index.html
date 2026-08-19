@@ -7,6 +7,9 @@
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="apple-touch-icon" href="/static/logo.png">
     <title>LAN C++26 IDE - 实时协同</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.css">
     <style>
         /* ===== 深色主题 (GitHub Dark) ===== */
         :root{
@@ -324,10 +327,58 @@
             box-shadow:0 0 0 2px rgba(212,162,74,.6); /* 聚焦高亮用金色，符合主题 */
         }
         .d-pos{font-family:var(--mono);font-size:11.5px;cursor:default;color:#ffffff;}
+        .d-font-btn{
+            background:none;border:none;color:#ffffff;cursor:pointer;
+            font-size:13px;padding:0 5px;line-height:1;border-radius:3px;font-weight:600;
+        }
+        .d-font-btn:hover{background:rgba(255,255,255,.12);}
+        .d-font-btn:active{background:rgba(255,255,255,.2);}
         @media (max-width: 720px){
             .d-switch-label{display:none;}
             .d-frame{gap:8px;}
         }
+
+        /* ===== Markdown 预览 + 文件分屏 ===== */
+        #md-toolbar{display:none;flex:0 0 auto;padding:4px 12px;background:var(--bg-2);border-bottom:1px solid var(--line);align-items:center;gap:8px;}
+        #md-container{flex:1;display:flex;min-height:0;position:relative;}
+        #split-left,#split-right{position:relative;min-width:80px;overflow:hidden;display:flex;flex-direction:column;}
+        #split-left-tab,#split-right-tab{flex:0 0 auto;display:flex;align-items:center;padding:2px 8px;background:var(--bg-2);border-bottom:1px solid var(--line);height:26px;}
+        #split-left-label,#split-right-label{font-size:11px;color:var(--text-mid);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        #split-right-tabs .rtab{
+            display:inline-flex;align-items:center;gap:4px;
+            padding:3px 8px;font-size:11.5px;font-family:var(--mono);
+            color:var(--text-mid);border-right:1px solid var(--line);
+            background:var(--bg-1);cursor:pointer;white-space:nowrap;user-select:none;
+        }
+        #split-right-tabs .rtab:hover{background:var(--bg-2);color:var(--text-hi);}
+        #split-right-tabs .rtab.active{background:#1e2228;color:var(--text-hi);box-shadow:inset 0 -2px 0 var(--brass);}
+        #split-right-tabs .rtab .rt-close{padding:0 2px;border-radius:3px;color:var(--text-lo);}
+        #split-right-tabs .rtab .rt-close:hover{background:rgba(248,81,73,.25);color:#fff;}
+        #split-right-tabs .rtab .rt-name{max-width:140px;overflow:hidden;text-overflow:ellipsis;}
+        #split-divider{flex:0 0 4px;min-height:0;cursor:col-resize;background:transparent;position:relative;display:none;}
+        #split-divider > div{position:absolute;top:0;left:1px;right:1px;bottom:0;background:var(--line);border-radius:2px;transition:background .2s;}
+        #split-divider:hover > div,#split-divider.active > div{background:var(--brass) !important;}
+        #split-divider.active > div{box-shadow:0 0 8px var(--brass-glow);}
+        #split-right-monaco{flex:1;min-height:0;}
+        #split-right-preview{flex:1;min-height:0;overflow:auto;padding:20px;background:var(--bg-0);color:var(--text-hi);display:none;font-family:var(--sans);line-height:1.7;word-wrap:break-word;}
+        #split-right-preview h1,#split-right-preview h2,#split-right-preview h3{color:var(--text-hi);border-bottom:1px solid var(--line);padding-bottom:4px;margin-top:20px;}
+        #split-right-preview h1{font-size:28px;}
+        #split-right-preview h2{font-size:22px;}
+        #split-right-preview h3{font-size:18px;}
+        #split-right-preview p{margin:10px 0;}
+        #split-right-preview code{background:var(--bg-2);padding:1px 6px;border-radius:3px;font-family:var(--mono);font-size:.9em;color:var(--text-hi);}
+        #split-right-preview pre{background:var(--bg-2);padding:12px;border-radius:6px;overflow:auto;border:1px solid var(--line);}
+        #split-right-preview pre code{background:none;padding:0;font-size:13px;}
+        #split-right-preview blockquote{border-left:3px solid var(--brass);padding-left:16px;margin:10px 0;color:var(--text-mid);}
+        #split-right-preview table{border-collapse:collapse;width:100%;margin:10px 0;}
+        #split-right-preview th,#split-right-preview td{border:1px solid var(--line);padding:6px 10px;text-align:left;}
+        #split-right-preview th{background:var(--bg-1);font-weight:600;}
+        #split-right-preview img{max-width:100%;border-radius:4px;}
+        #split-right-preview ul,#split-right-preview ol{padding-left:24px;margin:8px 0;}
+        #split-right-preview li{margin:4px 0;}
+        #split-right-preview a{color:var(--info);text-decoration:none;}
+        #split-right-preview a:hover{text-decoration:underline;}
+        #split-right-preview hr{border:none;border-top:1px solid var(--line);margin:20px 0;}
 
         /* 协作者光标 */
         .remote-cursor{position:relative;height:0;border-left:2px solid #888;margin-left:-1px;}
@@ -782,6 +833,7 @@
             </div>
         </div>
         <button class="btn primary" id="btn-backup" disabled>💾 备份</button>
+        <button class="btn" id="btn-templates" title="自定义文件模板（按扩展名）">📝 模板</button>
     </div>
 
     <div id="main">
@@ -803,19 +855,49 @@
         <div id="editor-wrap">
             <div id="editor-tabs-wrap">
                 <div id="editor-tabs"></div>
+                <div id="tab-sep" style="display:none;flex:0 0 auto;width:1px;align-self:stretch;background:var(--line);margin:4px 0 4px 4px;"></div>
+                <div id="right-tabs-bar" style="display:none;flex:0 0 auto;align-items:center;min-width:0;">
+                    <span id="split-right-label" style="display:none;font-size:11px;color:var(--text-mid);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;">右侧</span>
+                    <div id="split-right-tabs" style="display:flex;align-items:center;overflow-x:auto;"></div>
+                    <button id="split-right-close" class="btn" style="font-size:10px;padding:1px 6px;margin-left:4px;" title="关闭右侧">✕</button>
+                </div>
             </div>
             <div id="empty-state">
                 <div style="font-family:var(--mono);font-size:28px;color:var(--line);">{ }</div>
                 <div>从左侧选择文件开始编辑</div>
             </div>
             <div id="editor-host">
-                <div id="editor-frame" style="display:flex;">
-                    <div id="gutter">1</div>
-                    <textarea id="code" spellcheck="false" wrap="off"></textarea>
-                    <div id="code-overlay"></div>
+                <div id="md-toolbar">
+                    <button class="btn md-mode-btn active" data-mode="edit">编辑</button>
+                    <button class="btn md-mode-btn" data-mode="preview">预览</button>
+                    <button class="btn md-mode-btn" data-mode="split">分屏</button>
                 </div>
-                <div id="monaco-editor"></div>
-
+                <div id="md-container" style="flex:1;display:flex;min-height:0;position:relative;">
+                    <div id="split-left" style="flex:1;min-height:0;display:flex;flex-direction:column;position:relative;min-width:80px;overflow:hidden;">
+                        <div id="split-left-tab" style="display:none;">
+                            <span id="split-left-label" style="font-size:11px;color:var(--text-mid);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">编辑器</span>
+                            <span style="flex:1;"></span>
+                            <button id="split-close" class="btn" style="font-size:10px;padding:1px 6px;display:none;" title="关闭分屏/预览">✕ 关闭</button>
+                        </div>
+                        <div id="md-editor-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;position:relative;">
+                            <div id="editor-frame" style="display:flex;flex:1;min-height:0;position:relative;">
+                                <div id="gutter">1</div>
+                                <textarea id="code" spellcheck="false" wrap="off"></textarea>
+                                <div id="code-overlay"></div>
+                            </div>
+                            <div id="monaco-editor" style="flex:1;min-height:0;display:none;"></div>
+                        </div>
+                    </div>
+                    <div id="split-divider">
+                        <div></div>
+                    </div>
+                    <div id="split-right" style="flex:1;min-height:0;display:none;flex-direction:column;position:relative;min-width:80px;overflow:hidden;">
+                        <div id="split-right-editor-wrap" style="flex:1;min-height:0;display:none;flex-direction:column;position:relative;">
+                            <div id="split-right-monaco" style="flex:1;min-height:0;"></div>
+                        </div>
+                        <div id="split-right-preview"></div>
+                    </div>
+                </div>
             </div>
 
             <div id="bottom-dock">
@@ -899,6 +981,12 @@
                         <span class="d-switch" id="d-switch-remote-cursor" role="switch" aria-checked="true" tabindex="0"><span class="d-switch-knob"></span></span>
                     </label>
                     <span class="d-sep"></span>
+                    <span class="d-item" title="编辑器字号">
+                        <button class="d-font-btn" id="d-font-decrease" title="减小字号">A-</button>
+                        <button class="d-font-btn" id="d-font-reset" title="重置字号">A</button>
+                        <button class="d-font-btn" id="d-font-increase" title="增大字号">A+</button>
+                    </span>
+                    <span class="d-sep"></span>
                     <span class="d-item d-pos" id="d-cursor-pos" title="当前光标位置">行 1, 列 1</span>
                 </div>
             </div>
@@ -907,6 +995,34 @@
     
     <input type="file" id="upload-input" multiple style="display:none">
     <input type="file" id="upload-zip-input" accept=".zip" style="display:none">
+
+    <div id="template-modal" class="modal-overlay" style="display:none;">
+        <div class="modal" style="width:460px;display:flex;flex-direction:column;max-height:80vh;">
+            <h3>文件模板配置</h3>
+            <p style="margin-bottom:10px;">按扩展名自定义新建文件时的初始内容</p>
+            <input type="text" class="modal-input" id="tmpl-ext" placeholder="扩展名，如 cpp / py / md" />
+            <div style="flex:0 0 auto;font-size:11px;color:var(--text-lo);margin-bottom:8px;">
+                可用占位符：
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{FileName}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{FileNameNoExt}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Date}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Time}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Year}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Month}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Day}</code>
+                <code style="background:var(--bg-0);padding:1px 4px;border-radius:2px;">{Author}</code>
+            </div>
+            <textarea id="tmpl-content" class="modal-input" rows="8" style="flex:1;min-height:120px;resize:vertical;font-family:var(--mono);font-size:12px;"></textarea>
+            <div style="flex:0 0 auto;margin-top:8px;font-size:11px;color:var(--text-lo);">💡 新建文件时将自动替换上述占位符</div>
+            <div class="modal-buttons" style="flex:0 0 auto;">
+                <button class="btn" id="tmpl-load">加载</button>
+                <button class="btn danger" id="tmpl-delete">删除</button>
+                <button class="btn" id="tmpl-close">关闭</button>
+                <button class="btn primary" id="tmpl-save">保存</button>
+            </div>
+        </div>
+    </div>
+
     <div id="toast-container"></div>
 
     <script src="/static/socket.io.min.js"></script>
@@ -975,6 +1091,7 @@
         let ttUser = '';
         let lastContent = '';  // 用于操作化编辑同步
         let lspChangeTimer = null;  // clangd 实时诊断的防抖
+        let editorFontSize = parseInt(localStorage.getItem('editor-font-size')) || 14;
 
         const JUDGEABLE_EXTS = ['c','cpp','cc','cxx','py'];
         const extOf = p => p.includes('.') ? p.split('.').pop().toLowerCase() : '';
@@ -1263,7 +1380,9 @@
         let otSynced = false;     // 是否已与服务端权威版本对齐(未对齐时编辑器只读, 防止编辑被 doc_sync 覆盖丢失)
 
         function updateEditorReadOnly(){
-            const ro = !otSynced;
+            // 未对齐权威版本(otSynced=false)或管理员设为只读(myReadonly)时锁定编辑器,
+            // 这样管理员设只读后 Monaco 会弹出原生 "Cannot edit in read-only editor" 提示
+            const ro = !otSynced || myReadonly;
             try { if(monacoEditor) monacoEditor.updateOptions({ readOnly: ro }); } catch(e){}
             try { if(codeEl) codeEl.readOnly = ro; } catch(e){}
         }
@@ -1674,13 +1793,14 @@
             monaco.editor.setModelMarkers(model, 'clangd', markers);
         });
         socket.on('presence', (data)=>{
-            if(data.path !== currentFile) return;
-            presenceList.innerHTML = '';
+            // 全局在线用户列表(跨房间), 服务端周期性 + 加入/离开/改名时广播
             const entries = (data.users && data.users.length)
                 ? data.users
                 : [{sid: socket.id, name: username}];
+            const now = Date.now();
+            presenceList.innerHTML = '';
             // 清理已离开用户的远程光标: 按 sid 精确匹配(同名用户不会互相误删)
-            const presentSids = new Set(data.sids || entries.map(u => u.sid));
+            const presentSids = new Set(entries.map(u => u.sid));
             for(const sid in remoteCursors){
                 if(!presentSids.has(sid)) clearRemoteCursor(sid);
             }
@@ -1690,13 +1810,16 @@
             entries.forEach(u=>{
                 const chip = document.createElement('span');
                 const isMe = u.sid === socket.id;
+                const isActive = (now - (u.last_active || 0)) <= 10000;
                 chip.className = 'user-chip' + (isMe ? ' me' : '') + (u.readonly ? ' ro' : '') + (!isMe && isAdmin ? ' clickable' : '');
                 if(isMe){
                     chip.title = '点击修改名字' + (myReadonly ? '（当前为只读模式）' : '');
                 } else {
-                    chip.title = `${u.device || '未知设备'} · 局域网IP尾 ${u.ip_tail || '?'}`;
+                    const fileName = u.current_file ? u.current_file.split('/').pop() : '未打开文件';
+                    chip.title = `${u.device || '未知设备'} · 正在编辑: ${fileName}`;
                 }
                 chip.innerHTML = `<span class="swatch" style="background:${colorFor(u.name)}"></span>${escapeHtml(u.name)}${u.admin ? ' 👑' : ''}${u.readonly ? ' 🔒' : ''}`;
+                if(!isActive){ chip.style.opacity = '0.4'; chip.style.color = 'var(--text-lo)'; }
                 if(isMe){
                     chip.addEventListener('click', promptRename);
                 } else if(isAdmin){
@@ -2174,9 +2297,11 @@
                     language: 'cpp',
                     theme: 'cpp26-dark',
                     automaticLayout: true,
+                    lineNumbersMinChars: 2,
+                    lineDecorationsWidth: 4,
                     fontFamily: "'Cascadia Code', 'Cascadia Mono', 'Fira Code', 'JetBrains Mono', 'Sarasa Mono SC', Consolas, ui-monospace, SFMono-Regular, Menlo, monospace",
-                    fontSize: 14,
-                    lineHeight: 22,
+                    fontSize: editorFontSize,
+                    lineHeight: Math.round(editorFontSize * 1.5),
                     minimap: { enabled: true, maxColumn: 80 },
                     padding: { top: 12 },
                     smoothScrolling: true,
@@ -3094,6 +3219,12 @@
                     dlBtn.title = '下载';
                     dlBtn.addEventListener('click', (e)=>{ e.stopPropagation(); downloadFile(item.path); });
                     actions.insertBefore(dlBtn, renameBtn);
+                    // 分屏打开: 在右侧打开该文件
+                    const splitBtn = document.createElement('button');
+                    splitBtn.className = 'tree-action-btn'; splitBtn.textContent = '⇢';
+                    splitBtn.title = '在右侧分屏打开';
+                    splitBtn.addEventListener('click', (e)=>{ e.stopPropagation(); toggleSplit(item.path); });
+                    actions.insertBefore(splitBtn, renameBtn);
                 }
                 row.appendChild(actions);
                 if(item.type === 'folder'){
@@ -3206,7 +3337,7 @@
                 renderEditorTabs();
             });
             bar.appendChild(spacer);
-            wrap.style.display = openTabs.length ? 'flex' : 'none';
+            updateTabWrapVisibility();
         }
         function switchEditorTab(path){
             if(path === currentFile) return;
@@ -3329,6 +3460,7 @@
             renderProblems();
             loadCPH(path);
             renderEditorTabs();
+            setupMarkdownForCurrentFile();
         }
         async function openFile(path, rowEl){
             document.querySelectorAll('.tree-item').forEach(el=>el.classList.remove('active'));
@@ -3929,8 +4061,20 @@
             const name = await showPrompt(folder ? '输入文件夹名:' : '输入文件名:', '');
             if(!name) return;
             const path = selectedFolder ? selectedFolder + '/' + name : name;
-            const res = await fetch('/api/create', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:path, folder:folder}) });
-            if(res.ok){ showToast(folder ? '文件夹已创建' : '文件已创建', 'success'); loadTree(); }
+            let content = '';
+            if(!folder && name.indexOf('.') >= 0){
+                const ext = name.split('.').pop().toLowerCase();
+                if(userTemplates[ext]) content = replaceTemplateVars(userTemplates[ext], name);
+            }
+            const res = await fetch('/api/create', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:path, folder:folder, content:content}) });
+            if(res.ok){
+                showToast(folder ? '文件夹已创建' : '文件已创建', 'success');
+                loadTree();
+                if(!folder){
+                    const row = document.querySelector(`.tree-item[data-path="${path}"]`);
+                    if(row) openFile(path, row);
+                }
+            }
             else{ const err=await res.json(); showToast(err.error||'创建失败','error'); }
         }
         async function renameItem(item){
@@ -4580,11 +4724,693 @@
             });
         }
 
+        // ===================== 编辑器字号 =====================
+        function applyFontSize(size){
+            size = Math.min(32, Math.max(8, size));
+            editorFontSize = size;
+            localStorage.setItem('editor-font-size', size);
+            // 行高随字号等比缩放(约 1.5 倍), 否则只变宽不变高(Monaco lineHeight 固定值会导致文字重叠)
+            const lh = Math.round(size * 1.5);
+            if(monacoEditor){ monacoEditor.updateOptions({ fontSize: size, lineHeight: lh }); }
+            if(rightMonaco){ rightMonaco.updateOptions({ fontSize: size, lineHeight: lh }); }
+            if(currentEditorType === 'textarea'){
+                codeEl.style.fontSize = size + 'px';
+                codeEl.style.lineHeight = '1.6';
+                gutterEl.style.fontSize = size + 'px';
+                gutterEl.style.lineHeight = '1.6';
+            }
+        }
+        function fontDecrease(){ applyFontSize(editorFontSize - 1); }
+        function fontIncrease(){ applyFontSize(editorFontSize + 1); }
+        function fontReset(){ applyFontSize(14); }
+
+        // ===================== Markdown 预览 + 文件分屏 =====================
+        const mdContainer = document.getElementById('md-container');
+        const mdEditorWrap = document.getElementById('md-editor-wrap');
+        const mdToolbar = document.getElementById('md-toolbar');
+        const splitLeft = document.getElementById('split-left');
+        const splitRight = document.getElementById('split-right');
+        const splitDivider = document.getElementById('split-divider');
+        const splitClose = document.getElementById('split-close');
+        const splitRightClose = document.getElementById('split-right-close');
+        const splitRightLabel = document.getElementById('split-right-label');
+        const splitRightEditorWrap = document.getElementById('split-right-editor-wrap');
+        const splitRightMonaco = document.getElementById('split-right-monaco');
+        const splitRightPreview = document.getElementById('split-right-preview');
+
+        let splitMode = false;
+        let rightFile = null;
+        let rightOpenTabs = [];  // 右侧分屏打开的标签(文件路径列表)
+        let rightMonaco = null;
+        let rightMonacoLoaded = false;
+        let rightFileContent = null;
+        let rightRemoteCursors = {};
+        let rightRemoteWidgets = {};
+        let splitRatio = parseFloat(localStorage.getItem('split-ratio')) || 0.5;
+        let isSplitDragging = false;
+        let isPreviewMode = false;
+        let mdDomMoved = false;
+        let rightDirty = false;
+        let rightSaveTimer = null;
+        // 右侧分屏的独立 OT 状态(与主编辑器完全对称, 左右可任意切换编辑, 双向实时同步)
+        let rightOtRevision = -1;
+        let rightOtOutstanding = null;
+        let rightOtBuffer = null;
+        let rightOtInbox = new Map();
+        let rightOtGapTimer = null;
+        let rightOtSynced = false;
+        let rightLastContent = null;
+        let rightApplyingRemote = false;
+        let mdMode = 'edit';
+        let isMarkdownFile = false;
+        let mdPreviewTimer = null;
+        let mdLastContent = '';
+
+        // ===================== 右侧分屏独立 OT 状态机 =====================
+        function updateRightEditorReadOnly(){
+            // 与主编辑器一致: 未同步或管理员只读时锁定右侧分屏
+            const ro = !rightOtSynced || myReadonly;
+            try { if(rightMonaco) rightMonaco.updateOptions({ readOnly: ro }); } catch(e){}
+        }
+        function rightOtReset(){
+            rightOtRevision = -1; rightOtOutstanding = null; rightOtBuffer = null; rightOtSynced = false;
+            rightOtInbox.clear(); if(rightOtGapTimer){ clearTimeout(rightOtGapTimer); rightOtGapTimer = null; }
+            updateRightEditorReadOnly();
+        }
+        function rightOtSend(op){ socket.emit('edit', { path: rightFile, op: op.toJSON(), base: rightOtRevision }, (ack)=>rightOtHandleAck(ack)); }
+        function rightOtHandleAck(ack){
+            if(!ack) return;
+            if(ack.readonly){ setMyReadonly(true); showToast('你已被管理员设为只读模式', 'warning'); return; }
+            if(ack.resync || ack.version == null){ rightResync(); return; }
+            rightOtEnqueue(ack.version, 'ack');
+        }
+        function rightOtEnqueue(version, kind, op){
+            if(typeof version !== 'number' || version <= rightOtRevision) return;
+            rightOtInbox.set(version, {kind, op});
+            rightOtDrain();
+        }
+        function rightOtDrain(){
+            while(rightOtInbox.has(rightOtRevision + 1)){
+                const m = rightOtInbox.get(rightOtRevision + 1);
+                rightOtInbox.delete(rightOtRevision + 1);
+                if(m.kind === 'ack') rightOtApplyAck(); else rightOtApplyServer(m.op);
+            }
+            if(rightOtInbox.size > 0 && !rightOtInbox.has(rightOtRevision + 1)){
+                if(!rightOtGapTimer) rightOtGapTimer = setTimeout(()=>{ rightOtGapTimer = null; if(rightOtInbox.size > 0 && !rightOtInbox.has(rightOtRevision + 1)) rightResync(); }, 8000);
+            } else if(rightOtGapTimer){ clearTimeout(rightOtGapTimer); rightOtGapTimer = null; }
+        }
+        function rightOtApplyLocal(op){
+            if(rightOtRevision < 0) return;
+            if(rightOtOutstanding === null){ rightOtOutstanding = op; rightOtSend(op); }
+            else if(rightOtBuffer !== null){ rightOtBuffer = rightOtBuffer.compose(op); }
+            else { rightOtBuffer = op; }
+        }
+        function rightOtApplyServer(op){
+            rightOtRevision += 1;
+            if(rightOtOutstanding === null){
+                rightApplyingRemote = true; applyOpToRightEditor(op); rightApplyingRemote = false;
+            } else if(rightOtBuffer !== null){
+                const p1 = TextOp.transform(rightOtOutstanding, op);
+                const p2 = TextOp.transform(rightOtBuffer, p1[1]);
+                rightApplyingRemote = true; applyOpToRightEditor(p2[1]); rightApplyingRemote = false;
+                rightOtOutstanding = p1[0]; rightOtBuffer = p2[0];
+            } else {
+                const p1 = TextOp.transform(rightOtOutstanding, op);
+                rightApplyingRemote = true; applyOpToRightEditor(p1[1]); rightApplyingRemote = false;
+                rightOtOutstanding = p1[0];
+            }
+        }
+        function rightOtApplyAck(){
+            rightOtRevision += 1;
+            if(rightOtOutstanding !== null){
+                if(rightOtBuffer !== null){ const b = rightOtBuffer; rightOtBuffer = null; rightOtOutstanding = b; rightOtSend(b); }
+                else { rightOtOutstanding = null; }
+            }
+        }
+        function applyOpToRightEditor(op){
+            if(!rightMonaco) return;
+            const model = rightMonaco.getModel();
+            const edits = [];
+            let pos = 0;
+            for(const c of op.ops){
+                if(otIsRetain(c)){ pos += c; }
+                else if(otIsInsert(c)){
+                    const p = model.getPositionAt(pos);
+                    edits.push({ range: new monaco.Range(p.lineNumber, p.column, p.lineNumber, p.column), text: c });
+                } else {
+                    const n = -c;
+                    const s = model.getPositionAt(pos);
+                    const e = model.getPositionAt(pos + n);
+                    edits.push({ range: new monaco.Range(s.lineNumber, s.column, e.lineNumber, e.column), text: '' });
+                    pos += n;
+                }
+            }
+            model.applyEdits(edits);
+            rightLastContent = rightMonaco.getValue();
+            rightFileContent = rightLastContent;
+        }
+        function rightResync(){
+            if(!rightFile) return;
+            rightOtReset();
+            socket.emit('join', { path: rightFile, username: username, device: deviceLabel() + ' (右)' });
+        }
+
+        function initSplit(){
+            splitDivider.addEventListener('mousedown', (e)=>{
+                isSplitDragging = true;
+                splitDivider.classList.add('active');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', (e)=>{
+                if(!isSplitDragging) return;
+                const rect = mdContainer.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const total = rect.width;
+                splitRatio = Math.max(0.15, Math.min(0.85, x / total));
+                applySplitRatio();
+            });
+            document.addEventListener('mouseup', ()=>{
+                if(isSplitDragging){
+                    isSplitDragging = false;
+                    splitDivider.classList.remove('active');
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                    localStorage.setItem('split-ratio', splitRatio);
+                    if(monacoEditor) setTimeout(()=>monacoEditor.layout(), 50);
+                    if(rightMonaco) setTimeout(()=>rightMonaco.layout(), 50);
+                }
+            });
+            window.addEventListener('resize', ()=>{ if(splitMode) applySplitRatio(); });
+            splitClose.addEventListener('click', closeSplit);
+            splitRightClose.addEventListener('click', closeSplit);
+        }
+
+        function applySplitRatio(){
+            const total = mdContainer.clientWidth;
+            if(total < 160){
+                splitLeft.style.flex = '1'; splitRight.style.flex = '1';
+                splitLeft.style.flexBasis = 'auto'; splitRight.style.flexBasis = 'auto';
+                return;
+            }
+            const leftWidth = Math.max(80, total * splitRatio);
+            const rightWidth = Math.max(80, total * (1 - splitRatio));
+            splitLeft.style.flex = '0 0 ' + leftWidth + 'px';
+            splitRight.style.flex = '0 0 ' + rightWidth + 'px';
+        }
+
+        function openSplit(filePath){
+            splitMode = true;
+            isPreviewMode = false;
+            splitRight.style.display = 'flex';
+            splitRightEditorWrap.style.display = 'flex';
+            splitRightPreview.style.display = 'none';
+            splitDivider.style.display = 'block';
+            splitClose.style.display = 'inline-block';
+            applySplitRatio();
+            openFileInRight(filePath);
+            if(monacoEditor) setTimeout(()=>monacoEditor.layout(), 50);
+        }
+
+        function closeSplit(){
+            splitMode = false;
+            isPreviewMode = false;
+            splitRight.style.display = 'none';
+            splitDivider.style.display = 'none';
+            splitClose.style.display = 'none';
+            splitLeft.style.flex = '1'; splitLeft.style.flexBasis = 'auto';
+            splitRight.style.flex = '1'; splitRight.style.flexBasis = 'auto';
+            if(rightFile){ socket.emit('leave', { path: rightFile }); }
+            if(rightMonaco){ rightMonaco.dispose(); rightMonaco = null; rightMonacoLoaded = false; }
+            rightFile = null;
+            rightOpenTabs = [];
+            rightFileContent = null;
+            rightLastContent = null;
+            rightOtReset();
+            rightRemoteCursors = {};
+            rightRemoteWidgets = {};
+            rightDirty = false;
+            splitRightLabel.style.display = 'none';
+            renderRightTabs();
+            if(monacoEditor) setTimeout(()=>monacoEditor.layout(), 50);
+        }
+
+        function toggleSplit(filePath){
+            if(!splitMode){ openSplit(filePath); }
+            else if(filePath === rightFile){ if(rightMonaco) rightMonaco.focus(); }
+            else { openFileInRight(filePath); }
+        }
+
+        function renderRightTabs(){
+            const bar = document.getElementById('split-right-tabs');
+            if(!bar) return;
+            bar.innerHTML = '';
+            rightOpenTabs.forEach(p => {
+                const tab = document.createElement('span');
+                tab.className = 'rtab' + (p === rightFile ? ' active' : '');
+                tab.title = p;
+                const name = document.createElement('span');
+                name.className = 'rt-name';
+                name.textContent = p.split('/').pop();
+                tab.appendChild(name);
+                const close = document.createElement('span');
+                close.className = 'rt-close';
+                close.textContent = '×';
+                close.title = '关闭';
+                close.addEventListener('click', (e)=>{ e.stopPropagation(); closeRightTab(p); });
+                tab.appendChild(close);
+                tab.addEventListener('click', ()=>{ if(p !== rightFile) openFileInRight(p); });
+                bar.appendChild(tab);
+            });
+            // 右侧标签与主标签同处一条标签栏, 中间以竖线分隔
+            const barWrap = document.getElementById('right-tabs-bar');
+            const sep = document.getElementById('tab-sep');
+            const hasRight = rightOpenTabs.length > 0;
+            bar.style.display = hasRight ? 'flex' : 'none';
+            if(barWrap) barWrap.style.display = hasRight ? 'flex' : 'none';
+            if(sep) sep.style.display = hasRight ? 'block' : 'none';
+            updateTabWrapVisibility();
+        }
+
+        function updateTabWrapVisibility(){
+            const wrap = document.getElementById('editor-tabs-wrap');
+            if(wrap) wrap.style.display = (openTabs.length || rightOpenTabs.length) ? 'flex' : 'none';
+        }
+
+        function closeRightTab(path){
+            const idx = rightOpenTabs.indexOf(path);
+            if(idx === -1) return;
+            rightOpenTabs.splice(idx, 1);
+            if(path === rightFile){
+                if(rightOpenTabs.length){
+                    openFileInRight(rightOpenTabs[Math.min(idx, rightOpenTabs.length - 1)]);
+                } else {
+                    closeSplit();
+                    return;
+                }
+            }
+            renderRightTabs();
+        }
+
+        async function openFileInRight(filePath){
+            if(!filePath) return;
+            // 离开旧的右侧房间, 避免残留在旧文件房间持续收到无关事件
+            if(rightFile && rightFile !== filePath){
+                socket.emit('leave', { path: rightFile });
+            }
+            if(rightOpenTabs.indexOf(filePath) === -1) rightOpenTabs.push(filePath);
+            rightFile = filePath;
+            try{
+                const res = await fetch('/api/file?path=' + encodeURIComponent(filePath));
+                const data = await res.json();
+                if(data.error){ showToast('打开失败: ' + data.error, 'error'); return; }
+                rightFileContent = data.content || '';
+            }catch(e){ showToast('加载失败', 'error'); return; }
+            splitRightLabel.textContent = filePath.split('/').pop();
+            splitRightLabel.title = filePath;
+            renderRightTabs();
+            rightLastContent = rightFileContent;
+            rightOtReset();
+            if(!rightMonacoLoaded) initRightMonaco();
+            if(rightMonaco){
+                rightApplyingRemote = true;
+                rightMonaco.setValue(rightFileContent);
+                rightApplyingRemote = false;
+                try { monaco.editor.setModelLanguage(rightMonaco.getModel(), langForExt(extOf(filePath))); } catch(e){}
+                setTimeout(()=>rightMonaco.layout(), 50);
+            }
+            socket.emit('join', { path: filePath, username: username, device: deviceLabel() + ' (右)' });
+        }
+
+        function initRightMonaco(){
+            if(rightMonacoLoaded) return;
+            const requireFn = window.monacoRequire || window.require;
+            if(!requireFn){ setTimeout(initRightMonaco, 200); return; }
+            requireFn(['vs/editor/editor.main'], ()=>{
+                rightMonaco = monaco.editor.create(splitRightMonaco, {
+                    value: rightFileContent || '',
+                    language: 'plaintext',
+                    theme: 'cpp26-dark',
+                    readOnly: !rightOtSynced,
+                    automaticLayout: true,
+                    lineNumbersMinChars: 2,
+                    lineDecorationsWidth: 4,
+                    fontFamily: "'Cascadia Code','Cascadia Mono','Fira Code','Consolas',monospace",
+                    fontSize: editorFontSize || 14,
+                    lineHeight: Math.round((editorFontSize || 14) * 1.5),
+                    minimap: { enabled: true, maxColumn: 80 },
+                    padding: { top: 12 },
+                    smoothScrolling: true,
+                    cursorSmoothCaretAnimation: true,
+                    fontLigatures: true,
+                    suggestOnTriggerCharacters: true,
+                    quickSuggestions: { other: true, comments: false, strings: false },
+                    tabSize: 4,
+                    insertSpaces: true,
+                    scrollBeyondLastLine: false
+                });
+                rightMonacoLoaded = true;
+                // 首次创建后立即应用内容与语言(此前只有后续打开才会设置语言)
+                if(rightFileContent != null){
+                    rightMonaco.setValue(rightFileContent);
+                }
+                if(rightFile){
+                    try { monaco.editor.setModelLanguage(rightMonaco.getModel(), langForExt(extOf(rightFile))); } catch(e){}
+                }
+                rightMonaco.onDidChangeModelContent(()=>{
+                    if(rightApplyingRemote || !rightFile) return;
+                    const newContent = rightMonaco.getValue();
+                    // 与主编辑器一致: diff 成单次替换操作走 OT 管线, 实时同步给同文件的其他协作者
+                    if(rightLastContent !== null){
+                        const op = computeDiff(rightLastContent, newContent);
+                        if(op.start !== op.end || op.text.length > 0){
+                            rightOtApplyLocal(TextOp.fromSplice(op, rightLastContent.length));
+                        }
+                    }
+                    rightLastContent = newContent;
+                    rightFileContent = newContent;
+                    rightDirty = true;
+                    clearTimeout(rightSaveTimer);
+                    const savePath = rightFile;
+                    rightSaveTimer = setTimeout(()=>{
+                        if(rightFile === savePath){ socket.emit('save', { path: rightFile, content: rightFileContent }); rightDirty = false; }
+                    }, 1500);
+                });
+                rightMonaco.onDidChangeCursorPosition(()=>{
+                    const pos = rightMonaco.getPosition();
+                    if(pos && rightFile){
+                        const offset = rightMonaco.getModel().getOffsetAt(pos);
+                        socket.emit('cursor', { path: rightFile, offset: offset });
+                    }
+                });
+                rightMonaco.addAction({
+                    id: 'right-format-document',
+                    label: '格式化文档',
+                    keybindings: [monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF],
+                    contextMenuGroupId: '2_editor',
+                    contextMenuOrder: 1,
+                    run: (ed)=>{ ed.getAction('editor.action.formatDocument').run(); }
+                });
+                applySplitRatio();
+            });
+        }
+
+        function renderRightRemoteCursors(){
+            if(!rightMonaco || !rightMonacoLoaded) return;
+            if(!remoteCursorsVisible){
+                for(const sid in rightRemoteWidgets){
+                    try { rightMonaco.removeContentWidget(rightRemoteWidgets[sid]); } catch(e){}
+                    delete rightRemoteWidgets[sid];
+                }
+                return;
+            }
+            const now = Date.now();
+            const model = rightMonaco.getModel();
+            if(!model) return;
+            const len = model.getValueLength();
+            for(const sid in rightRemoteWidgets){
+                if(!rightRemoteCursors[sid] || (now - rightRemoteCursors[sid].ts > 10000)){
+                    try { rightMonaco.removeContentWidget(rightRemoteWidgets[sid]); } catch(e){}
+                    delete rightRemoteWidgets[sid];
+                }
+            }
+            for(const sid in rightRemoteCursors){
+                const u = rightRemoteCursors[sid];
+                if(now - u.ts > 10000) continue;
+                const off = Math.max(0, Math.min(u.offset, len));
+                const pos = model.getPositionAt(off);
+                if(rightRemoteWidgets[sid]){
+                    try { rightMonaco.removeContentWidget(rightRemoteWidgets[sid]); } catch(e){}
+                    delete rightRemoteWidgets[sid];
+                }
+                const domEl = document.createElement('div');
+                domEl.className = 'remote-cursor';
+                domEl.style.borderLeftColor = u.color;
+                domEl.innerHTML = `<span class="remote-cursor-name" style="background:${u.color}">${escapeHtml(u.username)}</span>`;
+                const widget = {
+                    getId: ()=>'rrc-' + sid,
+                    getDomNode: ()=>domEl,
+                    getPosition: ()=>({
+                        position: { lineNumber: pos.lineNumber, column: pos.column },
+                        preference: [monaco.editor.ContentWidgetPositionPreference.EXACT]
+                    })
+                };
+                rightMonaco.addContentWidget(widget);
+                rightRemoteWidgets[sid] = widget;
+            }
+        }
+        setInterval(renderRightRemoteCursors, 2000);
+
+        // 右侧分屏的远程光标 / 文档同步
+        socket.on('cursor', (data)=>{
+            if(!data || typeof data.offset !== 'number') return;
+            if(splitMode && rightFile && data.path === rightFile){
+                const uname = data.username || '匿名';
+                rightRemoteCursors[data.sid || 'unknown'] = { username: uname, color: colorFor(uname), offset: data.offset, ts: Date.now() };
+                renderRightRemoteCursors();
+            }
+        });
+        socket.on('doc_sync', (data)=>{
+            if(!data) return;
+            if(splitMode && rightFile && data.path === rightFile){
+                rightFileContent = data.content;
+                rightLastContent = data.content;
+                rightOtReset();
+                rightOtRevision = (typeof data.version === 'number') ? data.version : 0;
+                rightOtSynced = true;
+                updateRightEditorReadOnly();
+                if(rightMonaco && rightMonacoLoaded){
+                    rightApplyingRemote = true;
+                    rightMonaco.setValue(data.content);
+                    rightApplyingRemote = false;
+                }
+            }
+        });
+        socket.on('edit', (data)=>{
+            if(!(splitMode && rightFile && data.path === rightFile)) return;
+            if(typeof data.version === 'number' && data.op){
+                let op;
+                try { op = TextOp.fromJSON(data.op); }
+                catch(e){ rightResync(); return; }
+                rightOtEnqueue(data.version, 'remote', op);
+            }
+        });
+
+        // ===================== Markdown 渲染 =====================
+        function setupMarkdownForCurrentFile(){
+            const isMd = /\.(md|markdown)$/i.test(currentFile || '');
+            if(isMd){
+                isMarkdownFile = true;
+                mdToolbar.style.display = 'flex';
+                if(mdMode !== 'edit'){ applyMdMode(); }
+            } else {
+                isMarkdownFile = false;
+                mdToolbar.style.display = 'none';
+                if(splitMode && isPreviewMode) closeSplit();
+                if(monacoEditor) setTimeout(()=>monacoEditor.layout(), 50);
+            }
+        }
+
+        function applyMdMode(){
+            if(!mdDomMoved){
+                const monacoEl = document.getElementById('monaco-editor');
+                const frameEl = document.getElementById('editor-frame');
+                if(!mdEditorWrap.contains(monacoEl) && monacoEl) mdEditorWrap.appendChild(monacoEl);
+                if(!mdEditorWrap.contains(frameEl) && frameEl) mdEditorWrap.appendChild(frameEl);
+                mdDomMoved = true;
+            }
+            if(mdMode === 'edit'){
+                if(splitMode) closeSplit();
+                splitLeft.style.flex = '1'; splitLeft.style.flexBasis = 'auto';
+            } else if(mdMode === 'preview' || mdMode === 'split'){
+                if(!splitMode || !isPreviewMode){
+                    isPreviewMode = true;
+                    splitMode = true;
+                    splitRight.style.display = 'flex';
+                    splitRightEditorWrap.style.display = 'none';
+                    splitRightPreview.style.display = 'block';
+                    splitDivider.style.display = 'block';
+                    splitClose.style.display = 'inline-block';
+                    splitRightLabel.textContent = '预览';
+                    splitRightLabel.style.display = '';
+                    const rTabs = document.getElementById('split-right-tabs');
+                    if(rTabs) rTabs.style.display = 'none';
+                    applySplitRatio();
+                    renderMarkdown();
+                    if(monacoEditor) setTimeout(()=>monacoEditor.layout(), 50);
+                }
+                applySplitRatio();
+            }
+        }
+
+        function renderMarkdown(){
+            if(!isMarkdownFile || !currentFile) return;
+            const content = getEditorContent();
+            if(content === mdLastContent) return;
+            mdLastContent = content;
+            try{
+                if(typeof marked === 'undefined') throw new Error('marked 未加载');
+                const html = marked.parse(content);
+                splitRightPreview.innerHTML = html;
+                if(typeof hljs !== 'undefined'){
+                    splitRightPreview.querySelectorAll('pre code').forEach((block)=>{ try { hljs.highlightElement(block); } catch(e){} });
+                }
+            }catch(e){
+                splitRightPreview.innerHTML = `<div style="color:var(--err);">渲染错误: ${escapeHtml(String(e.message || e))}</div>`;
+            }
+        }
+
+        function initMarkdown(){
+            document.querySelectorAll('.md-mode-btn').forEach((btn)=>{
+                btn.addEventListener('click', ()=>{
+                    document.querySelectorAll('.md-mode-btn').forEach((b)=>b.classList.remove('active'));
+                    btn.classList.add('active');
+                    mdMode = btn.dataset.mode;
+                    applyMdMode();
+                });
+            });
+            // textarea 模式下的实时渲染
+            codeEl.addEventListener('input', ()=>{
+                if(isMarkdownFile){
+                    clearTimeout(mdPreviewTimer);
+                    mdPreviewTimer = setTimeout(renderMarkdown, 300);
+                }
+            });
+        }
+
+        // Monaco 加载完成后挂载 Markdown 渲染钩子(轮询直到可用; 编辑器重建后重新挂载)
+        let mdHookedEditor = null;
+        function ensureMarkdownHook(){
+            if(monacoEditor && monacoEditor !== mdHookedEditor){
+                mdHookedEditor = monacoEditor;
+                monacoEditor.onDidChangeModelContent(()=>{
+                    if(isMarkdownFile){
+                        clearTimeout(mdPreviewTimer);
+                        mdPreviewTimer = setTimeout(renderMarkdown, 300);
+                    }
+                });
+            }
+            if(!monacoEditor || monacoEditor !== mdHookedEditor){
+                setTimeout(ensureMarkdownHook, 500);
+            }
+        }
+
+        // ===================== 文件模板 =====================
+        const btnTemplates = document.getElementById('btn-templates');
+        const templateModal = document.getElementById('template-modal');
+        const tmplExt = document.getElementById('tmpl-ext');
+        const tmplContent = document.getElementById('tmpl-content');
+        const tmplLoad = document.getElementById('tmpl-load');
+        const tmplSave = document.getElementById('tmpl-save');
+        const tmplDelete = document.getElementById('tmpl-delete');
+        const tmplClose = document.getElementById('tmpl-close');
+
+        let userTemplates = {};
+        async function loadTemplates(){
+            try{
+                const res = await fetch('/api/templates');
+                userTemplates = (await res.json()) || {};
+            }catch(e){ userTemplates = {}; }
+        }
+        function replaceTemplateVars(content, fileName){
+            const now = new Date();
+            const nameNoExt = fileName.replace(/\.[^.]+$/, '');
+            const vars = {
+                '{FileName}': fileName,
+                '{FileNameNoExt}': nameNoExt,
+                '{Date}': now.toISOString().slice(0,10),
+                '{Time}': now.toTimeString().slice(0,8),
+                '{Year}': String(now.getFullYear()),
+                '{Month}': String(now.getMonth()+1).padStart(2,'0'),
+                '{Day}': String(now.getDate()).padStart(2,'0'),
+                '{Author}': username
+            };
+            let result = content;
+            for(const key in vars){ result = result.split(key).join(vars[key]); }
+            return result;
+        }
+        function initTemplateModal(){
+            btnTemplates.addEventListener('click', ()=>{
+                templateModal.style.display = 'flex';
+                tmplExt.value = '';
+                tmplContent.value = '';
+                tmplExt.focus();
+            });
+            tmplClose.addEventListener('click', ()=>templateModal.style.display = 'none');
+            templateModal.addEventListener('click', (e)=>{ if(e.target === templateModal) templateModal.style.display = 'none'; });
+            tmplLoad.addEventListener('click', async ()=>{
+                const ext = tmplExt.value.trim().toLowerCase();
+                if(!ext){ showToast('请输入扩展名', 'warning'); return; }
+                try{
+                    const res = await fetch('/api/templates/' + encodeURIComponent(ext));
+                    const content = await res.json();
+                    tmplContent.value = typeof content === 'string' ? content : '';
+                }catch(e){ tmplContent.value = ''; }
+            });
+            tmplExt.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') tmplLoad.click(); });
+            tmplSave.addEventListener('click', async ()=>{
+                const ext = tmplExt.value.trim().toLowerCase();
+                if(!ext){ showToast('请输入扩展名', 'warning'); return; }
+                const res = await fetch('/api/templates/' + encodeURIComponent(ext), {
+                    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ content: tmplContent.value })
+                });
+                const data = await res.json();
+                if(data.ok){ userTemplates[ext] = tmplContent.value; showToast('模板已保存', 'success'); }
+                else showToast('保存失败: ' + (data.error || '未知错误'), 'error');
+            });
+            tmplDelete.addEventListener('click', ()=>{
+                const ext = tmplExt.value.trim().toLowerCase();
+                if(!ext){ showToast('请输入扩展名', 'warning'); return; }
+                showConfirm('确定要删除 .' + ext + ' 的模板配置吗？', async ()=>{
+                    const res = await fetch('/api/templates/' + encodeURIComponent(ext), { method: 'DELETE' });
+                    const data = await res.json();
+                    if(data.ok){ delete userTemplates[ext]; tmplContent.value = ''; showToast('模板已删除', 'info'); }
+                    else showToast('删除失败: ' + (data.error || '未知错误'), 'error');
+                });
+            });
+        }
+
+        // ===================== 主编辑器右键菜单: 格式化文档 =====================
+        let formatHookedEditor = null;
+        function ensureFormatAction(){
+            if(monacoEditor && monacoEditor !== formatHookedEditor && typeof monaco !== 'undefined' && monaco.editor){
+                formatHookedEditor = monacoEditor;
+                monacoEditor.addAction({
+                    id: 'format-document',
+                    label: '格式化文档',
+                    keybindings: [monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF],
+                    contextMenuGroupId: '2_editor',
+                    contextMenuOrder: 1,
+                    run: (ed)=>{ ed.getAction('editor.action.formatDocument').run(); }
+                });
+            }
+            if(!monacoEditor || monacoEditor !== formatHookedEditor){
+                setTimeout(ensureFormatAction, 500);
+            }
+        }
+
         // ===================== 初始化 =====================
+        const dFontDecrease = document.getElementById('d-font-decrease');
+        const dFontReset = document.getElementById('d-font-reset');
+        const dFontIncrease = document.getElementById('d-font-increase');
+
         async function init(){
+            applyFontSize(editorFontSize);
+            initSplit();
+            initMarkdown();
+            ensureMarkdownHook();
+            ensureFormatAction();
+            loadTemplates();
+            initTemplateModal();
+            dFontDecrease.addEventListener('click', fontDecrease);
+            dFontReset.addEventListener('click', fontReset);
+            dFontIncrease.addEventListener('click', fontIncrease);
             if(currentEditorType === 'textarea'){
                 monacoContainer.style.display = 'none';
                 editorFrame.style.display = 'flex';
+                codeEl.style.fontSize = editorFontSize + 'px';
+                gutterEl.style.fontSize = editorFontSize + 'px';
             } else {
                 editorFrame.style.display = 'none';
                 monacoContainer.style.display = 'block';
