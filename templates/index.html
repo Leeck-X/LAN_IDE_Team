@@ -202,10 +202,49 @@
         .user-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg-2);border:1px solid var(--line);color:var(--text-mid);font-size:11.5px;padding:4px 8px;border-radius:12px;margin:0 6px 6px 0;transition:var(--transition);}
         .user-chip:hover{border-color:var(--brass-dim);color:var(--text-hi);}
         .user-chip .swatch{width:7px;height:7px;border-radius:50%;}
+        .user-chip.me{cursor:pointer;border-style:dashed;}
+        .user-chip.me:hover{border-color:var(--brass);color:var(--brass);}
+        .user-chip.clickable{cursor:pointer;}
+        .user-chip.ro{opacity:.75;}
+        /* 管理员点击其他用户弹出的用户卡片(统计/只读管理) */
+        #user-card{position:fixed;z-index:4000;background:var(--bg-1);border:1px solid var(--brass-dim);border-radius:8px;padding:12px 14px;width:262px;box-shadow:0 8px 28px rgba(0,0,0,.45);font-size:12.5px;color:var(--text-mid);}
+        #user-card h4{margin:0 0 8px;font-size:13px;color:var(--text-hi);display:flex;align-items:center;gap:6px;word-break:break-all;}
+        #user-card .uc-row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;color:var(--text-lo);}
+        #user-card .uc-row b{color:var(--text-mid);font-weight:600;text-align:right;word-break:break-all;}
+        #user-card .uc-actions{display:flex;gap:8px;margin-top:10px;}
+        #user-card .uc-actions .btn{flex:1;padding:5px 8px;font-size:12px;}
 
         /* 编辑区域 */
         #editor-wrap{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;}
         #empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-lo);font-size:13px;flex-direction:column;gap:8px;}
+        /* 二进制文件预览面板(图片/视频/PDF/不支持预览的类型) */
+        .binary-preview{flex:1;display:flex;flex-direction:column;width:100%;min-height:0;align-self:stretch;}
+        .binary-toolbar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg-1);border-bottom:1px solid var(--line);flex:0 0 auto;}
+        .binary-name{font-family:var(--mono);font-size:12.5px;color:var(--text-hi);max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .binary-meta{font-size:12px;color:var(--text-lo);white-space:nowrap;}
+        .binary-toolbar .spacer{flex:1;}
+        .binary-toolbar .btn{padding:4px 12px;font-size:12px;}
+        .binary-body{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;overflow:auto;padding:16px;}
+        .binary-body img{max-width:100%;max-height:100%;object-fit:contain;border-radius:var(--radius);box-shadow:0 2px 16px rgba(0,0,0,.35);}
+        .binary-body video{max-width:100%;max-height:100%;border-radius:var(--radius);background:#000;}
+        .binary-body audio{width:min(480px,100%);}
+        .binary-body iframe{width:100%;height:100%;border:none;border-radius:var(--radius);background:#fff;}
+        /* ===== 独立图片预览: PS 式画布缩放/平移 ===== */
+        .img-canvas{position:relative;flex:1;width:100%;height:100%;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;background:
+            linear-gradient(45deg,#00000022 25%,transparent 25%,transparent 75%,#00000022 75%),
+            linear-gradient(45deg,#00000022 25%,transparent 25%,transparent 75%,#00000022 75%);
+            background-size:20px 20px;background-position:0 0,10px 10px;cursor:grab;touch-action:none;}
+        .img-canvas.panning{cursor:grabbing;}
+        .img-canvas img{position:absolute;top:0;left:0;max-width:none !important;max-height:none !important;box-shadow:0 2px 16px rgba(0,0,0,.35);border-radius:2px;user-select:none;-webkit-user-drag:none;transform-origin:0 0;will-change:transform;object-fit:unset;}
+        .img-canvas-toolbar{position:absolute;right:14px;bottom:14px;display:flex;align-items:center;gap:2px;background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-md);padding:4px;z-index:5;}
+        .img-canvas-toolbar button{width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;border-radius:6px;color:var(--text-hi);font-size:16px;cursor:pointer;transition:var(--transition);}
+        .img-canvas-toolbar button:hover{background:var(--bg-2);}
+        .img-canvas-toolbar button:disabled{opacity:.35;cursor:not-allowed;}
+        .img-canvas-toolbar .zoom-pct{min-width:46px;text-align:center;font-size:12px;color:var(--text-mid);font-family:var(--mono);user-select:none;}
+        .img-canvas-toolbar .sep{width:1px;height:18px;background:var(--line);margin:0 3px;}
+        .binary-unsupported{display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--text-lo);font-size:13px;text-align:center;}
+        .binary-unsupported .big-icon{font-size:42px;opacity:.75;}
+        .binary-unsupported .hint-title{font-size:14px;color:var(--text-mid);}
         #editor-host{flex:1;min-height:0;display:none;background:#1e2228;flex-direction:column;}
         #editor-frame{display:flex;flex:1;min-height:0;position:relative;}
         #gutter{flex:0 0 auto;width:46px;background:#1a1e24;color:var(--text-lo);font-family:var(--mono);font-size:13.5px;line-height:1.6;text-align:right;padding:14px 8px 14px 0;overflow:hidden;user-select:none;white-space:pre;}
@@ -227,6 +266,68 @@
         #code-overlay .sq-error{text-decoration:underline wavy var(--err);}
         #code-overlay .sq-warning{text-decoration:underline wavy var(--warn);}
         #monaco-editor{flex:1;min-height:0;display:none;}
+
+        /* ===== D 框: 代码区底部状态栏(模仿 VS Code 底部状态栏) ===== */
+        #d-frame{
+            flex:0 0 auto;
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            height:28px;
+            padding:0 12px;
+            background:var(--bg-1);
+            border-top:1px solid var(--line);
+            font-family:var(--sans);
+            font-size:12px;
+            color:#ffffff;
+            user-select:none;
+            gap:14px;
+            overflow:hidden;
+        }
+        .d-frame-left, .d-frame-right{display:flex;align-items:center;gap:10px;min-width:0;}
+        .d-item{display:flex;align-items:center;gap:6px;white-space:nowrap;}
+        .d-problems{
+            display:flex;align-items:center;gap:10px;
+            background:none;border:none;padding:2px 6px;margin:0;border-radius:3px;
+            color:inherit;font-family:inherit;font-size:12px;cursor:pointer;
+            transition:background .12s;
+        }
+        .d-problems:hover{background:rgba(0,0,0,.15);}
+        .d-problems-err, .d-problems-warn{display:inline-flex;align-items:center;gap:3px;color:#ffffff;}
+        .d-sep{width:1px;height:14px;background:rgba(0,0,0,.25);flex:0 0 auto;}
+        .d-switch-item{cursor:pointer;}
+        .d-switch-label{font-size:11.5px;}
+        .d-switch{
+            position:relative;
+            width:28px;height:15px;
+            border-radius:8px;
+            background:rgba(255,255,255,.15);  /* 关闭状态：浅灰半透明，在深色背景上可见 */
+            flex:0 0 auto;
+            transition:background .15s;
+            outline:none;
+        }
+        .d-switch .d-switch-knob{
+            position:absolute;top:1.5px;left:1.5px;
+            width:12px;height:12px;border-radius:50%;
+            background:#c0c8d0;               /* 关闭状态滑块：浅灰，不刺眼 */
+            box-shadow:0 1px 3px rgba(0,0,0,.5);
+            transition:left .15s;
+        }
+        .d-switch.on{
+            background:rgba(95,185,135,.45);   /* 打开状态：绿色半透明，与主题 ok 色呼应 */
+        }
+        .d-switch.on .d-switch-knob{
+            left:14.5px;
+            background:#5fb987;               /* 打开状态滑块：亮绿色 */
+        }
+        .d-switch:focus-visible{
+            box-shadow:0 0 0 2px rgba(212,162,74,.6); /* 聚焦高亮用金色，符合主题 */
+        }
+        .d-pos{font-family:var(--mono);font-size:11.5px;cursor:default;color:#ffffff;}
+        @media (max-width: 720px){
+            .d-switch-label{display:none;}
+            .d-frame{gap:8px;}
+        }
 
         /* 协作者光标 */
         .remote-cursor{position:relative;height:0;border-left:2px solid #888;margin-left:-1px;}
@@ -714,6 +815,7 @@
                     <div id="code-overlay"></div>
                 </div>
                 <div id="monaco-editor"></div>
+
             </div>
 
             <div id="bottom-dock">
@@ -726,7 +828,7 @@
                     <button class="dock-pin" id="dock-pin" title="切换 浮动/常驻 模式">📍</button>
                     <button class="dock-close" id="dock-close">×</button>
                 </div>
-
+                
                 <!-- 控制台面板 -->
                 <div class="dock-pane active" id="pane-console">
                     <div id="console-content">
@@ -779,9 +881,30 @@
                     </div>
                 </div>
             </div>
+            <div id="d-frame">
+                <div class="d-frame-left">
+                    <button class="d-item d-problems" id="d-problems" title="点击查看问题列表">
+                        <span class="d-problems-err" id="d-err-count">✕ 0</span>
+                        <span class="d-problems-warn" id="d-warn-count">⚠ 0</span>
+                    </button>
+                </div>
+                <div class="d-frame-right">
+                    <label class="d-item d-switch-item" title="开启/关闭智能感知补全">
+                        <span class="d-switch-label">IntelliSense</span>
+                        <span class="d-switch" id="d-switch-intellisense" role="switch" aria-checked="true" tabindex="0"><span class="d-switch-knob"></span></span>
+                    </label>
+                    <span class="d-sep"></span>
+                    <label class="d-item d-switch-item" title="开启/关闭协同他人远程光标显示">
+                        <span class="d-switch-label">远程光标</span>
+                        <span class="d-switch" id="d-switch-remote-cursor" role="switch" aria-checked="true" tabindex="0"><span class="d-switch-knob"></span></span>
+                    </label>
+                    <span class="d-sep"></span>
+                    <span class="d-item d-pos" id="d-cursor-pos" title="当前光标位置">行 1, 列 1</span>
+                </div>
+            </div>
         </div>
     </div>
-
+    
     <input type="file" id="upload-input" multiple style="display:none">
     <input type="file" id="upload-zip-input" accept=".zip" style="display:none">
     <div id="toast-container"></div>
@@ -792,12 +915,42 @@
         const USER_COLORS = ["#d4a24a","#5fb987","#6ea8d4","#c67ac9","#d47a7a","#7ac6c1"];
         function colorFor(name){ let h=0; for(const ch of name) h=(h*31+ch.charCodeAt(0))%USER_COLORS.length; return USER_COLORS[h]; }
         let username = localStorage.getItem('cpp26-username') || '匿名';
+        // 身份/权限: 是否服务器本机(管理员)、是否被管理员设为只读
+        let isAdmin = false;
+        let myReadonly = false;
+        function deviceLabel(){
+            // 浏览器可获取的设备标签(系统+浏览器); 服务端会优先用局域网反查到的主机名
+            const ua = navigator.userAgent;
+            const os = /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android'
+                : (/iPhone|iPad/.test(ua) ? 'iOS' : (/Linux/.test(ua) ? 'Linux' : '未知系统'));
+            const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox'
+                : (/Safari\//.test(ua) ? 'Safari' : '浏览器');
+            return os + ' · ' + br;
+        }
+        function updateStatusText(){
+            statusText.textContent = `在线（${username}${myReadonly ? ' · 只读' : ''}）`;
+        }
+        function setMyReadonly(v){
+            if(myReadonly === v) return;
+            myReadonly = v;
+            updateEditorReadOnly();
+            updateStatusText();
+        }
+        function readonlyGuard(){
+            if(!myReadonly) return false;
+            showToast('只读模式：管理员已禁止你修改', 'warning');
+            return true;
+        }
+        fetch('/api/me').then(r=>r.json()).then(d=>{
+            isAdmin = !!d.admin;
+            if(d.readonly) setMyReadonly(true);
+        }).catch(()=>{});
         if(!localStorage.getItem('cpp26-username')){
             showPrompt('你的名字（协作者可见）:', '匿名').then(n => {
                 if(n && n.trim()){
                     username = n.trim();
                     localStorage.setItem('cpp26-username', username);
-                    statusText.textContent = `在线（${username}）`;
+                    updateStatusText();
                 }
             });
         }
@@ -883,6 +1036,14 @@
         const problemsSummary = document.getElementById('problems-summary');
         const problemsBadge = document.getElementById('problems-badge');
         const problemsList = document.getElementById('problems-list');
+        // ===== D 框 (代码区底部状态栏) 元素引用 =====
+        const dFrame = document.getElementById('d-frame');
+        const dErrCount = document.getElementById('d-err-count');
+        const dWarnCount = document.getElementById('d-warn-count');
+        const dProblemsBtn = document.getElementById('d-problems');
+        const dCursorPos = document.getElementById('d-cursor-pos');
+        const dSwitchIntellisense = document.getElementById('d-switch-intellisense');
+        const dSwitchRemoteCursor = document.getElementById('d-switch-remote-cursor');
         const consoleStatus = document.getElementById('console-status');
         const consoleOutput = document.getElementById('console-output');
         const consoleInput = document.getElementById('console-input');
@@ -1114,6 +1275,7 @@
         function otSend(op){ socket.emit('edit', { path: currentFile, op: op.toJSON(), base: otRevision }, (ack)=>otHandleAck(ack)); }
         function otHandleAck(ack){
             if(!ack) return;
+            if(ack.readonly){ setMyReadonly(true); showToast('你已被管理员设为只读模式', 'warning'); return; }
             if(ack.resync || ack.version == null){ resyncDoc(); return; }
             otEnqueue(ack.version, 'ack');
         }
@@ -1190,9 +1352,44 @@
                         pos += n;
                     }
                 }
+                // ===== 修复: 协同远程编辑到达时, 补全下拉框方向键选择被强制重定向到第一项 =====
+                // 根因: model.applyEdits 触发的 cursor-change 事件 reason/source 不是
+                // Monaco 内置 SuggestModel 认可的 "keyboard 输入" 或 "Explicit API 调用",
+                // 所以只要收到远程编辑(哪怕编辑位置和当前补全上下文毫不相关), SuggestModel
+                // 就会无条件 cancel 当前补全会话, 导致用户此前按 ↓ 选中的候选项(如 apple)
+                // 被重置/关闭, 弹回第一项(如 add) 甚至直接收起下拉框。
+                // 修复思路: applyEdits 后, 如果补全面板原本是打开的, 显式调用一次
+                // monacoEditor.setSelection(...) 把本地光标/选区"重新对齐"到变换后的正确位置。
+                // 这是一次公开 API 调用, Monaco 会将其记为 Explicit 来源的 cursor-change,
+                // SuggestModel 对此不会 cancel, 而只会静默刷新过滤结果, 从而保留用户已经
+                // 选中的候选项与方向键交互状态, 不产生弹回或闪烁。
+                const suggestWasVisible = isSuggestWidgetVisible();
+                let localAnchorBefore = null, localActiveBefore = null;
+                if(suggestWasVisible){
+                    const sel = monacoEditor.getSelection();
+                    if(sel){
+                        localAnchorBefore = model.getOffsetAt({ lineNumber: sel.selectionStartLineNumber, column: sel.selectionStartColumn });
+                        localActiveBefore = model.getOffsetAt({ lineNumber: sel.positionLineNumber, column: sel.positionColumn });
+                    }
+                }
                 model.applyEdits(edits);
                 lastContent = monacoEditor.getValue();
+                if(suggestWasVisible && localAnchorBefore !== null){
+                    const newAnchorOffset = transformCursor(localAnchorBefore, op);
+                    const newActiveOffset = transformCursor(localActiveBefore, op);
+                    const anchorPos = model.getPositionAt(newAnchorOffset);
+                    const activePos = model.getPositionAt(newActiveOffset);
+                    // 用公开 API 显式重新定位本地光标/选区(Explicit cursor-change),
+                    // 覆盖掉 applyEdits 隐式产生的、会被 SuggestModel 判定需要 cancel 的移动。
+                    monacoEditor.setSelection(new monaco.Selection(anchorPos.lineNumber, anchorPos.column, activePos.lineNumber, activePos.column));
+                }
             }
+        }
+        // 补全面板当前是否处于可见状态(通过 DOM 检测, 避免依赖 Monaco 内部未公开 API)
+        function isSuggestWidgetVisible(){
+            if(!monacoContainer) return false;
+            const w = monacoContainer.querySelector('.suggest-widget');
+            return !!(w && w.classList.contains('visible'));
         }
         function transformCursor(p, op){
             let oldIndex = 0, newIndex = 0;
@@ -1215,6 +1412,10 @@
         let remoteCursors = {};   // sid -> {username, color, offset, ts}
         let remoteWidgets = {};   // sid -> Monaco content widget
         let cursorEmitTimer = null;
+        // D 框"远程光标"总开关状态, 默认开启, 持久化到 localStorage 记住用户偏好
+        let remoteCursorsVisible = localStorage.getItem('d-frame-remote-cursor') !== 'off';
+        // D 框"IntelliSense"总开关状态, 默认开启
+        let intellisenseEnabled = localStorage.getItem('d-frame-intellisense') !== 'off';
 
         function emitCursor(){
             if(!currentFile) return;
@@ -1228,6 +1429,8 @@
             socket.emit('cursor', { path: currentFile, offset: offset });
         }
         function scheduleCursor(){
+            // D 框行列号需要即时更新(不能等 80ms 节流), 与网络上报的节流分开处理
+            updateDFrameCursorPos();
             // 节流: 最多 ~80ms 上报一次, 保证毫秒级同步又不刷爆
             if(cursorEmitTimer) return;
             cursorEmitTimer = setTimeout(()=>{ cursorEmitTimer = null; emitCursor(); }, 80);
@@ -1236,6 +1439,17 @@
             const now = Date.now();
             for(const sid in remoteCursors){
                 if(now - remoteCursors[sid].ts > 12000) delete remoteCursors[sid]; // 12s 无心跳视为离开
+            }
+            // D 框远程光标总开关关闭时: 不渲染任何远程光标控件(但仍持续接收/记录数据,
+            // 重新打开开关时可以立即恢复显示, 不需要等下一次远程用户移动光标)
+            if(!remoteCursorsVisible){
+                if(currentEditorType !== 'textarea' && monacoEditor){
+                    for(const sid in remoteWidgets){
+                        try { monacoEditor.removeContentWidget(remoteWidgets[sid]); } catch(e){}
+                        delete remoteWidgets[sid];
+                    }
+                }
+                return;
             }
             if(currentEditorType !== 'textarea' && monacoEditor){
                 // 移除已离开用户的控件
@@ -1281,6 +1495,76 @@
             delete remoteWidgets[sid];
             delete remoteCursors[sid];
         }
+
+        // ===================== D 框: 代码区底部状态栏 =====================
+        // 本地光标行列号展示(即时更新, 不受协同光标广播的 80ms 节流影响, 和 VS Code 状态栏体验一致)
+        function updateDFrameCursorPos(){
+            if(!dCursorPos) return;
+            let line = 1, col = 1;
+            if(currentEditorType === 'textarea'){
+                const before = codeEl.value.slice(0, codeEl.selectionStart);
+                const lines = before.split('\n');
+                line = lines.length;
+                col = lines[lines.length - 1].length + 1;
+            } else if(monacoEditor){
+                const pos = monacoEditor.getPosition();
+                if(pos){ line = pos.lineNumber; col = pos.column; }
+            }
+            dCursorPos.textContent = `行 ${line}, 列 ${col}`;
+        }
+        // 错误/警告计数展示, 复用现有 problemList(由 lsp_diagnostics 填充), 与"问题"面板数据源保持一致
+        function updateDFrameProblemCount(){
+            if(!dErrCount || !dWarnCount) return;
+            const errors = problemList.filter(p => p.severity === 1).length;
+            const warnings = problemList.filter(p => p.severity === 2).length;
+            dErrCount.textContent = '✕ ' + errors;
+            dWarnCount.textContent = '⚠ ' + warnings;
+            dErrCount.classList.toggle('has-err', errors > 0);
+            dWarnCount.classList.toggle('has-warn', warnings > 0);
+        }
+        function setSwitchState(el, on){
+            el.classList.toggle('on', on);
+            el.setAttribute('aria-checked', on ? 'true' : 'false');
+        }
+        function applyIntellisenseState(){
+            setSwitchState(dSwitchIntellisense, intellisenseEnabled);
+            if(monacoEditor){
+                monacoEditor.updateOptions({
+                    quickSuggestions: intellisenseEnabled ? { other: true, comments: false, strings: false } : false,
+                    suggestOnTriggerCharacters: intellisenseEnabled,
+                    parameterHints: { enabled: intellisenseEnabled }
+                });
+            }
+        }
+        function applyRemoteCursorState(){
+            setSwitchState(dSwitchRemoteCursor, remoteCursorsVisible);
+            renderRemoteCursors();
+        }
+        function toggleIntellisense(){
+            intellisenseEnabled = !intellisenseEnabled;
+            localStorage.setItem('d-frame-intellisense', intellisenseEnabled ? 'on' : 'off');
+            applyIntellisenseState();
+        }
+        function toggleRemoteCursorVisibility(){
+            remoteCursorsVisible = !remoteCursorsVisible;
+            localStorage.setItem('d-frame-remote-cursor', remoteCursorsVisible ? 'on' : 'off');
+            applyRemoteCursorState();
+        }
+        function initDFrame(){
+            applyIntellisenseState();
+            applyRemoteCursorState();
+            updateDFrameCursorPos();
+            updateDFrameProblemCount();
+            // 开关同时支持点击和键盘(空格/回车)操作, 满足基本可访问性
+            [[dSwitchIntellisense, toggleIntellisense], [dSwitchRemoteCursor, toggleRemoteCursorVisibility]].forEach(([el, fn]) => {
+                el.addEventListener('click', fn);
+                el.addEventListener('keydown', (e) => {
+                    if(e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); fn(); }
+                });
+            });
+            dProblemsBtn.addEventListener('click', () => openDock('problems'));
+        }
+        initDFrame();
 
         function showToast(message, type='info', duration=3000){
             const toast = document.createElement('div');
@@ -1336,9 +1620,14 @@
 
         // ===================== Socket 事件 =====================
         socket.on('connect', ()=>{
-            statusText.textContent = `在线（${username}）`;
+            updateStatusText();
             // 重连后强制重新对齐权威版本(断线期间的版本号已失效), 否则继续编辑必然 resync 覆盖
             if(currentFile) resyncDoc();
+        });
+        socket.on('readonly_changed', (data)=>{
+            setMyReadonly(!!data.readonly);
+            showToast(data.readonly ? '你已被管理员设为只读模式' : '管理员已解除你的只读模式',
+                      data.readonly ? 'warning' : 'success');
         });
         socket.on('disconnect', ()=>{
             statusText.textContent = '断开连接';
@@ -1387,23 +1676,103 @@
         socket.on('presence', (data)=>{
             if(data.path !== currentFile) return;
             presenceList.innerHTML = '';
-            const users = data.users.length ? data.users : [username];
-            // 清理已离开用户的远程光标: 优先按 sid 精确匹配(同名用户不会互相误删),
-            // 旧版服务器无 sids 字段时回退按用户名匹配
-            const presentSids = new Set(data.sids || []);
-            const presentNames = new Set(users);
+            const entries = (data.users && data.users.length)
+                ? data.users
+                : [{sid: socket.id, name: username}];
+            // 清理已离开用户的远程光标: 按 sid 精确匹配(同名用户不会互相误删)
+            const presentSids = new Set(data.sids || entries.map(u => u.sid));
             for(const sid in remoteCursors){
-                const gone = presentSids.size ? !presentSids.has(sid)
-                                              : !presentNames.has(remoteCursors[sid].username);
-                if(gone) clearRemoteCursor(sid);
+                if(!presentSids.has(sid)) clearRemoteCursor(sid);
             }
-            users.forEach(u=>{
+            // 从自己的条目同步只读状态(presence 广播可能先于 readonly_changed 到达)
+            const me = entries.find(u => u.sid === socket.id);
+            if(me) setMyReadonly(!!me.readonly);
+            entries.forEach(u=>{
                 const chip = document.createElement('span');
-                chip.className = 'user-chip';
-                chip.innerHTML = `<span class="swatch" style="background:${colorFor(u)}"></span>${escapeHtml(u)}`;
+                const isMe = u.sid === socket.id;
+                chip.className = 'user-chip' + (isMe ? ' me' : '') + (u.readonly ? ' ro' : '') + (!isMe && isAdmin ? ' clickable' : '');
+                if(isMe){
+                    chip.title = '点击修改名字' + (myReadonly ? '（当前为只读模式）' : '');
+                } else {
+                    chip.title = `${u.device || '未知设备'} · 局域网IP尾 ${u.ip_tail || '?'}`;
+                }
+                chip.innerHTML = `<span class="swatch" style="background:${colorFor(u.name)}"></span>${escapeHtml(u.name)}${u.admin ? ' 👑' : ''}${u.readonly ? ' 🔒' : ''}`;
+                if(isMe){
+                    chip.addEventListener('click', promptRename);
+                } else if(isAdmin){
+                    chip.addEventListener('click', (e)=>{ e.stopPropagation(); showUserCard(u, chip); });
+                }
                 presenceList.appendChild(chip);
             });
         });
+
+        // ===================== 用户改名 / 管理员用户卡片 =====================
+        async function promptRename(){
+            // 左下角点击自己的名字条即可改名, 立即对全体协作者生效
+            const n = await showPrompt('修改名字（协作者可见）:', username);
+            if(!n || !n.trim() || n.trim() === username) return;
+            username = n.trim().slice(0, 32);
+            localStorage.setItem('cpp26-username', username);
+            updateStatusText();
+            socket.emit('rename', { name: username });
+            showToast('名字已更新', 'success', 1500);
+        }
+        let userCardEl = null;
+        function closeUserCard(){
+            if(userCardEl){
+                userCardEl.remove();
+                userCardEl = null;
+                document.removeEventListener('mousedown', onUserCardOutside);
+            }
+        }
+        function onUserCardOutside(e){
+            if(userCardEl && !userCardEl.contains(e.target)) closeUserCard();
+        }
+        // 管理员点击其他用户: 弹出该用户的设备/IP/使用统计, 并可切换只读模式
+        async function showUserCard(u, anchor){
+            closeUserCard();
+            const card = document.createElement('div');
+            card.id = 'user-card';
+            const rect = anchor.getBoundingClientRect();
+            card.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 280)) + 'px';
+            card.style.top = Math.max(8, rect.top - 250) + 'px';
+            card.innerHTML = '<h4>加载中…</h4>';
+            document.body.appendChild(card);
+            userCardEl = card;
+            setTimeout(()=>document.addEventListener('mousedown', onUserCardOutside), 0);
+            try{
+                const res = await fetch('/api/admin/users');
+                const list = await res.json();
+                if(!Array.isArray(list)) throw new Error(list.error || '加载失败');
+                const rec = list.find(r => (r.online || []).some(o => o.sid === u.sid))
+                         || list.find(r => r.ip_tail === u.ip_tail || r.name === u.name)
+                         || {ip: '', name: u.name};
+                card.innerHTML = `
+                    <h4>${escapeHtml(u.name)}${u.readonly ? ' 🔒' : ''}${u.admin ? ' 👑' : ''}</h4>
+                    <div class="uc-row"><span>IP</span><b>${escapeHtml(rec.ip || '?')}</b></div>
+                    <div class="uc-row"><span>设备</span><b>${escapeHtml(u.device || '未知设备')}</b></div>
+                    <div class="uc-row"><span>代码量</span><b>${(rec.code_chars || 0).toLocaleString('zh-CN')} 字符</b></div>
+                    <div class="uc-row"><span>新建文件</span><b>${rec.creates || 0}</b></div>
+                    <div class="uc-row"><span>保存次数</span><b>${rec.saves || 0}</b></div>
+                    <div class="uc-row"><span>上传次数</span><b>${rec.uploads || 0}</b></div>
+                    <div class="uc-row"><span>删除次数</span><b>${rec.deletes || 0}</b></div>
+                    <div class="uc-actions">
+                        <button class="btn ${u.readonly ? 'success' : 'danger'}" id="uc-toggle-ro">${u.readonly ? '解除只读' : '设为只读'}</button>
+                    </div>`;
+                card.querySelector('#uc-toggle-ro').addEventListener('click', async ()=>{
+                    try{
+                        const r2 = await fetch('/api/admin/readonly', {
+                            method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify({ ip: rec.ip, readonly: !u.readonly })
+                        });
+                        if(r2.ok){ showToast(u.readonly ? '已解除只读' : '已设为只读', 'success'); closeUserCard(); }
+                        else{ const e2 = await r2.json(); showToast(e2.error || '操作失败', 'error'); }
+                    }catch(e){ showToast('操作失败', 'error'); }
+                });
+            }catch(e){
+                card.innerHTML = `<h4>加载失败</h4><div class="uc-row"><span></span><b>${escapeHtml(String(e.message || e))}</b></div>`;
+            }
+        }
         socket.on('cursor', (data)=>{
             if(data.path !== currentFile) return;
             if(!data || typeof data.offset !== 'number') return;
@@ -1432,7 +1801,7 @@
             // 版本缺口/变换失败时, 请求一次权威内容重新对齐
             if(!currentFile) return;
             otReset();
-            socket.emit('join', { path: currentFile, username: username });
+            socket.emit('join', { path: currentFile, username: username, device: deviceLabel() });
         }
         socket.on('edit', (data)=>{
             if(data.path !== currentFile) return;
@@ -1534,7 +1903,7 @@
                 socket.emit('leave', { path: data.old_path });
                 currentFile = data.new_path;
                 filepathEl.textContent = currentFile;
-                socket.emit('join', { path: currentFile, username: username });
+                socket.emit('join', { path: currentFile, username: username, device: deviceLabel() });
                 showToast(`文件已重命名为 ${data.new_path}`, 'info');
             }
             // 同步标签页与缓存中的路径
@@ -1792,6 +2161,11 @@
                         'scrollbarSlider.background': '#30363d80',
                         'scrollbarSlider.hoverBackground': '#6e7681cc',
                         'scrollbarSlider.activeBackground': '#9aa4b2cc',
+                        // 查找/替换面板高亮配色, 对齐 VS Code Dark+
+                        'editor.findMatchBackground': '#9e6a03aa',
+                        'editor.findMatchHighlightBackground': '#ea983355',
+                        'editor.findMatchBorder': '#e0a84a',
+                        'editor.findMatchHighlightBorder': '#00000000',
                     }
                 });
 
@@ -1818,7 +2192,19 @@
                     tabCompletion: 'on',
                     acceptSuggestionOnEnter: 'smart',
                     suggestSelection: 'first',
-                    inlineSuggest: { enabled: false }
+                    inlineSuggest: { enabled: false },
+                    // ===== 查找/替换 (Ctrl+F 查找, Ctrl+H 替换, F3/Shift+F3 上一个/下一个) =====
+                    // Monaco 内置查找控件已支持: 关键词检索、上下匹配跳转、全部高亮、
+                    // 区分大小写/全词匹配筛选、单处替换与全部替换; 行为对标 VS Code。
+                    // 协同场景下, 替换产生的编辑会经由 onDidChangeModelContent → OT 管线
+                    // 自动 diff 成操作并同步给其他在线用户, 无需额外处理。
+                    find: {
+                        cursorMoveOnType: true,
+                        seedSearchStringFromSelection: 'always',
+                        autoFindInSelection: 'never',
+                        addExtraSpaceOnTop: true,
+                        loop: true
+                    }
                 });
 
                 // ===================== TypeScript / JavaScript IntelliSense (VSCode 原版补全) =====================
@@ -1851,6 +2237,82 @@
                 function mkRange(model, position){
                     const word = model.getWordUntilPosition(position);
                     return { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
+                }
+
+                // ===================== 转到声明 (F12 / 右键菜单) =====================
+                // Web IDE 场景下部分系统/浏览器快捷键(如 F12 常被浏览器占用打开开发者工具)
+                // 不能保证一定能拦截到, 所以主入口放在右键菜单(editor.addAction 会自动注册进
+                // Monaco 右键菜单), F12 键绑定作为"能拦截时更快"的增强, 不作为唯一触发方式。
+                monacoEditor.addAction({
+                    id: 'goto-declaration',
+                    label: '转到声明',
+                    keybindings: [monaco.KeyCode.F12],
+                    precondition: undefined,
+                    contextMenuGroupId: 'navigation',
+                    contextMenuOrder: 1.5,
+                    run: function(ed){ gotoDeclaration(ed); }
+                });
+                async function gotoDeclaration(ed){
+                    if(!currentFile){ return; }
+                    const ext = extOf(currentFile);
+                    if(['cpp','cc','cxx','h','hpp','hh','c'].indexOf(ext) < 0){
+                        showToast('当前文件类型暂不支持转到声明', 'error');
+                        return;
+                    }
+                    const model = ed.getModel();
+                    const position = ed.getPosition();
+                    if(!model || !position) return;
+                    // 光标未落在标识符上(比如空行/符号处)时直接提示, 不发无意义请求
+                    const word = model.getWordAtPosition(position);
+                    if(!word){
+                        showToast('请先将光标放在变量 / 函数 / 类型名上', 'error');
+                        return;
+                    }
+                    const payload = {
+                        path: currentFile,
+                        text: model.getValue(),
+                        line: position.lineNumber - 1,
+                        character: position.column - 1
+                    };
+                    let resp;
+                    try {
+                        resp = await new Promise((resolve, reject)=>{
+                            const timer = setTimeout(()=>reject(new Error('timeout')), 6000);
+                            socket.emit('lsp_definition', payload, function(r){ clearTimeout(timer); resolve(r); });
+                        });
+                    } catch(e){
+                        showToast('转到声明请求超时, 请稍后重试', 'error');
+                        return;
+                    }
+                    if(!resp || resp.error){
+                        showToast(resp && resp.error ? resp.error : '转到声明失败', 'error');
+                        return;
+                    }
+                    if(resp.outside){
+                        showToast('声明位于工作区外(如系统头文件), 暂不支持跳转', 'error');
+                        return;
+                    }
+                    if(!resp.found){
+                        showToast('未找到 "' + word.word + '" 的声明', 'error');
+                        return;
+                    }
+                    const targetLine = resp.line + 1;
+                    const targetCol = resp.character + 1;
+                    if(resp.path === currentFile){
+                        // 同文件内跳转: 直接定位, 无需重新打开
+                        ed.revealPositionInCenter({ lineNumber: targetLine, column: targetCol });
+                        ed.setPosition({ lineNumber: targetLine, column: targetCol });
+                        ed.focus();
+                    } else {
+                        // 跨文件声明: 打开目标文件后再定位, 打开是异步的(可能需要网络请求文件内容)
+                        const targetRow = document.querySelector('.tree-item[data-path="' + resp.path + '"]');
+                        await openFile(resp.path, targetRow);
+                        if(monacoEditor && currentFile === resp.path){
+                            monacoEditor.revealPositionInCenter({ lineNumber: targetLine, column: targetCol });
+                            monacoEditor.setPosition({ lineNumber: targetLine, column: targetCol });
+                            monacoEditor.focus();
+                        }
+                    }
                 }
                 // ===================== C++ 补全 =====================
                 const CPP_HEADERS = ['algorithm','bits/stdc++.h','bitset','cctype','cmath','cstdio','cstdlib','cstring','deque','functional','iomanip','iostream','limits','list','map','memory','numeric','queue','set','span','sstream','stack','string','tuple','unordered_map','unordered_set','utility','vector'];
@@ -1892,7 +2354,7 @@
                     return names;
                 }
                 const CPP_PREPROCESS = [
-                    { label: 'include', insertText: 'include <iostream>', detail: '改库名请手动选中 iostream 替换' },
+                    { label: 'include', insertText: 'include <${1:iostream}>', detail: '库名已选中, 可直接输入替换' },
                     { label: 'define', insertText: 'define ${1:NAME} ${2:value}' },
                     { label: 'ifdef', insertText: 'ifdef ${1:NAME}' },
                     { label: 'ifndef', insertText: 'ifndef ${1:NAME}' },
@@ -2026,27 +2488,38 @@
                         const word = model.getWordUntilPosition(position);
                         const prefix = (word.word || '').toLowerCase();
 
-                        // 上下文1: #include <...> → 补头文件名 (自动加 > 闭合, 避免回车后位置错乱)
+                        // 上下文1: #include <...> → 补头文件名
+                        // 补全后自动选中 <> 内的头文件名(整体作为可编辑的 tabstop),
+                        // 方便用户直接输入覆盖, 无需手动删除, 行为对标 VS Code。
                         const incMatch = textBefore.match(/#\s*include\s*[<"]([^>"\s]*)$/);
                         if (incMatch) {
+                            const openChar = textBefore.charAt(textBefore.length - incMatch[1].length - 1); // '<' 或 '"'
+                            const closeChar = openChar === '<' ? '>' : '"';
                             const hdrPrefix = incMatch[1];
                             // 若已闭合(出现 > 或 "), 不再补全, 避免提示
                             if (hdrPrefix === '' && /[>"']\s*$/.test(textBefore)) {
                                 return { suggestions: [] };
                             }
                             const startColumn = position.column - hdrPrefix.length;
-                            const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: startColumn, endColumn: position.column };
-                            // 检测光标后是否紧跟 > 或 "(已闭合), 决定是否自动补 >
+                            // 光标之后, 到下一个闭合符号(或 行尾/空白)之前的既有文本也一并纳入替换范围,
+                            // 这样即使光标停在头文件名中间, 选中补全项也会替换掉整个既有头文件名。
                             const afterCursor = lineContent.substring(position.column - 1);
-                            const hasCloseBracket = /^[>"']/.test(afterCursor);
+                            const afterMatch = afterCursor.match(new RegExp('^[^' + closeChar + '\\s]*'));
+                            const afterLen = afterMatch ? afterMatch[0].length : 0;
+                            const hasCloseBracket = afterCursor.charAt(afterLen) === closeChar;
+                            const endColumn = position.column + afterLen;
+                            const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: startColumn, endColumn: endColumn };
                             return { suggestions: CPP_HEADERS
                                 .filter(h => h.startsWith(hdrPrefix))
                                 .map(h => ({
                                     label: h,
                                     kind: K.Module,
-                                    insertText: hasCloseBracket ? h : (h + '>'),
+                                    // 头文件名整体作为 tabstop ${1:...}, 插入后自动选中,
+                                    // 用户可直接输入替换, 未闭合时自动补 closeChar。
+                                    insertText: '${1:' + h + '}' + (hasCloseBracket ? '' : closeChar),
+                                    insertTextRules: SNIPPET,
                                     range: range,
-                                    detail: hasCloseBracket ? 'header' : 'header (auto close >)',
+                                    detail: hasCloseBracket ? 'header' : ('header (auto close ' + closeChar + ')'),
                                     sortText: '0'
                                 })) };
                         }
@@ -2614,6 +3087,14 @@
                 deleteBtn.className = 'tree-action-btn'; deleteBtn.textContent = '🗑';
                 deleteBtn.addEventListener('click', (e)=>{ e.stopPropagation(); deleteItem(item); });
                 actions.appendChild(renameBtn); actions.appendChild(deleteBtn);
+                if(item.type === 'file'){
+                    // 云盘式下载: 任意文件(文本/二进制)都可直接从文件树下载
+                    const dlBtn = document.createElement('button');
+                    dlBtn.className = 'tree-action-btn'; dlBtn.textContent = '⬇';
+                    dlBtn.title = '下载';
+                    dlBtn.addEventListener('click', (e)=>{ e.stopPropagation(); downloadFile(item.path); });
+                    actions.insertBefore(dlBtn, renameBtn);
+                }
                 row.appendChild(actions);
                 if(item.type === 'folder'){
                     const childWrap = document.createElement('div');
@@ -2843,7 +3324,7 @@
             consoleStop.disabled = true;
             btnRunInConsole.disabled = false;
             btnSendInput.disabled = true;
-            socket.emit('join', { path: path, username: username });
+            socket.emit('join', { path: path, username: username, device: deviceLabel() });
             problemList = [];
             renderProblems();
             loadCPH(path);
@@ -2875,8 +3356,9 @@
                     setEditorContent('');
                     editorHost.style.display = 'none';
                     emptyState.style.display = 'flex';
-                    emptyState.innerHTML = `<img src="${encodeURI(data.url)}" style="max-width:100%;max-height:100%;" alt="preview" />`;
+                    renderBinaryPreview(path, data);
                     btnPanel.disabled = true; btnFre.disabled = true; btnExport.disabled = true; btnBackup.disabled = true;
+                    btnRunInConsole.disabled = true;
                     return;
                 }
                 fileContentCache[path] = data.content || '';
@@ -2884,9 +3366,225 @@
             activateFile(path);
         }
 
+        // ===================== 二进制文件预览与下载 =====================
+        function rawFileUrl(path, download){
+            return '/api/file/raw?path=' + encodeURIComponent(path) + (download ? '&download=1' : '');
+        }
+        function formatSize(bytes){
+            if(bytes === null || bytes === undefined) return '';
+            if(bytes < 1024) return bytes + ' B';
+            if(bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if(bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+            return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+        }
+        function downloadFile(path){
+            const a = document.createElement('a');
+            a.href = rawFileUrl(path, true);
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            showToast('开始下载: ' + path.split('/').pop(), 'info', 2000);
+        }
+        // 按类型渲染预览: 图片/视频/音频/PDF 在线预览, 其余(exe/zip等)提示无法预览并提供下载
+        function renderBinaryPreview(path, data){
+            const mime = data.mime || 'application/octet-stream';
+            const name = path.split('/').pop();
+            const ext = name.includes('.') ? name.split('.').pop().toUpperCase() : '';
+            filepathEl.textContent = path;
+            const rawUrl = rawFileUrl(path, false);
+            const kind = mime.startsWith('image/') ? 'image'
+                : mime.startsWith('video/') ? 'video'
+                : mime.startsWith('audio/') ? 'audio'
+                : (mime === 'application/pdf') ? 'pdf' : 'other';
+            let bodyHtml = '';
+            if(kind === 'image'){
+                // 独立图片预览: 画布容器 + 悬浮工具条(+/-缩放/重置), 交互逻辑见 initImageCanvas
+                bodyHtml = `<div class="img-canvas" id="img-canvas">
+                        <img src="${rawUrl}" alt="${escapeHtml(name)}" id="img-canvas-el" draggable="false" />
+                    </div>
+                    <div class="img-canvas-toolbar" id="img-canvas-toolbar">
+                        <button id="img-zoom-out" title="缩小">−</button>
+                        <span class="zoom-pct" id="img-zoom-pct">100%</span>
+                        <button id="img-zoom-in" title="放大">＋</button>
+                        <span class="sep"></span>
+                        <button id="img-zoom-reset" title="重置视图 (适应窗口)">⟲</button>
+                    </div>`;
+            } else if(kind === 'video'){
+                // 独立视频预览默认静音播放(不影响 Markdown 文档内嵌视频), 用户可手动开启音量
+                bodyHtml = `<video src="${rawUrl}" controls preload="metadata" muted></video>`;
+            } else if(kind === 'audio'){
+                bodyHtml = `<audio src="${rawUrl}" controls preload="metadata"></audio>`;
+            } else if(kind === 'pdf'){
+                bodyHtml = `<iframe src="${rawUrl}" title="pdf-preview"></iframe>`;
+            } else {
+                bodyHtml = `<div class="binary-unsupported">
+                    <span class="big-icon">📦</span>
+                    <div class="hint-title">「${escapeHtml(ext || 'BIN')}」类型文件暂不支持在线预览</div>
+                    <div>可下载到本地后使用对应软件打开</div>
+                </div>`;
+            }
+            const metaBits = [mime];
+            if(data.size !== null && data.size !== undefined) metaBits.push(formatSize(data.size));
+            emptyState.innerHTML = `
+                <div class="binary-preview">
+                    <div class="binary-toolbar">
+                        <span class="binary-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
+                        <span class="binary-meta">${metaBits.join(' · ')}</span>
+                        <span class="spacer"></span>
+                        <button class="btn" id="btn-binary-open">新窗口打开</button>
+                        <button class="btn primary" id="btn-binary-download">下载</button>
+                    </div>
+                    <div class="binary-body" style="${kind === 'image' ? 'position:relative;padding:0;' : ''}">${bodyHtml}</div>
+                </div>`;
+            // 图片加载失败(损坏/误判类型)时回退为提示
+            const img = emptyState.querySelector('#img-canvas-el');
+            if(img){
+                img.addEventListener('error', ()=>{
+                    const canvas = emptyState.querySelector('#img-canvas');
+                    const toolbar = emptyState.querySelector('#img-canvas-toolbar');
+                    if(toolbar) toolbar.remove();
+                    if(canvas) canvas.outerHTML = `<div class="binary-unsupported"><span class="big-icon">⚠</span><div class="hint-title">预览加载失败, 文件可能已损坏</div><div>可尝试下载后查看</div></div>`;
+                });
+                initImageCanvas(img);
+            }
+            document.getElementById('btn-binary-download').addEventListener('click', ()=>downloadFile(path));
+            document.getElementById('btn-binary-open').addEventListener('click', ()=>window.open(rawUrl, '_blank'));
+        }
+
+        // ===================== 独立图片预览: PS 式画布缩放/平移 =====================
+        // 仅作用于独立打开的图片文件预览窗口, 不影响 Markdown 文档内嵌图片。
+        const IMG_ZOOM_MIN = 0.05;   // 缩放下限 5%
+        const IMG_ZOOM_MAX = 16;     // 缩放上限 1600%
+        const IMG_ZOOM_STEP = 1.25;  // 按钮/滚轮单次缩放倍率
+        function initImageCanvas(img){
+            const canvas = document.getElementById('img-canvas');
+            const toolbar = document.getElementById('img-canvas-toolbar');
+            if(!canvas || !toolbar) return;
+            const zoomPctEl = document.getElementById('img-zoom-pct');
+            const btnIn = document.getElementById('img-zoom-in');
+            const btnOut = document.getElementById('img-zoom-out');
+            const btnReset = document.getElementById('img-zoom-reset');
+
+            let fitScale = 1;      // 适应容器的基准缩放(相对图片原始像素)
+            let scale = 1;         // 当前实际缩放(相对图片原始像素)
+            let tx = 0, ty = 0;    // 图片左上角相对画布左上角的平移量(px)
+            let naturalW = 0, naturalH = 0;
+            let ready = false;
+
+            let userAdjusted = false; // 用户是否已手动缩放/平移过, 用于决定容器 resize 时是否强制重新适配
+
+            function clampScale(s){ return Math.min(IMG_ZOOM_MAX, Math.max(IMG_ZOOM_MIN, s)); }
+
+            function computeFit(){
+                const cw = canvas.clientWidth, ch = canvas.clientHeight;
+                if(!naturalW || !naturalH || !cw || !ch){ fitScale = 1; return; }
+                // 图片尺寸大于或小于容器时都自动缩放到合适大小, 保持原始比例, 不溢出面板
+                fitScale = Math.min(cw / naturalW, ch / naturalH, 1) || 1;
+                // 极小图片也允许放大铺满(但不超过 100%), 避免小图缩成一个点; 如需保持原样可去掉此行
+                if(fitScale <= 0) fitScale = 1;
+            }
+
+            function applyTransform(){
+                img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+                if(zoomPctEl) zoomPctEl.textContent = Math.round(scale * 100) + '%';
+                if(btnIn) btnIn.disabled = scale >= IMG_ZOOM_MAX - 1e-6;
+                if(btnOut) btnOut.disabled = scale <= IMG_ZOOM_MIN + 1e-6;
+            }
+
+            function resetView(){
+                computeFit();
+                scale = clampScale(fitScale);
+                const cw = canvas.clientWidth, ch = canvas.clientHeight;
+                // 居中显示
+                tx = (cw - naturalW * scale) / 2;
+                ty = (ch - naturalH * scale) / 2;
+                userAdjusted = false;
+                applyTransform();
+            }
+
+            // 以指定的画布坐标(锚点)为中心缩放, 保持锚点在视觉上位置不变(类似 PS/浏览器 Ctrl+滚轮)
+            function zoomAt(anchorX, anchorY, nextScale){
+                nextScale = clampScale(nextScale);
+                if(nextScale === scale) return;
+                const ratio = nextScale / scale;
+                tx = anchorX - (anchorX - tx) * ratio;
+                ty = anchorY - (anchorY - ty) * ratio;
+                scale = nextScale;
+                applyTransform();
+            }
+
+            function zoomAtCenter(nextScale){
+                const cw = canvas.clientWidth, ch = canvas.clientHeight;
+                zoomAt(cw / 2, ch / 2, nextScale);
+            }
+
+            // ---- 初始化: 图片自适应容器 ----
+            function onImgReady(){
+                naturalW = img.naturalWidth || img.width || 1;
+                naturalH = img.naturalHeight || img.height || 1;
+                ready = true;
+                resetView();
+            }
+            if(img.complete && img.naturalWidth){ onImgReady(); }
+            else { img.addEventListener('load', onImgReady, { once: true }); }
+
+            // 容器尺寸变化(如侧栏展开/收起、窗口 resize)时, 若用户尚未手动缩放/平移过, 保持"适应窗口"状态实时重算;
+            // 用户已手动调整过视图后不再自动改变缩放, 避免打断操作。
+            const ro = new ResizeObserver(() => { if(ready && !userAdjusted) resetView(); });
+            ro.observe(canvas);
+            // 预览切换文件时该 DOM 会被整体替换, 无需手动 disconnect, 但保险起见挂到元素上供 GC 前清理
+            canvas._imgCanvasCleanup = () => ro.disconnect();
+
+            // ---- 按钮缩放 ----
+            btnIn.addEventListener('click', () => { if(ready){ userAdjusted = true; zoomAtCenter(scale * IMG_ZOOM_STEP); } });
+            btnOut.addEventListener('click', () => { if(ready){ userAdjusted = true; zoomAtCenter(scale / IMG_ZOOM_STEP); } });
+            btnReset.addEventListener('click', () => { if(ready) resetView(); });
+
+            // ---- 鼠标滚轮缩放: 以光标位置为中心 ----
+            canvas.addEventListener('wheel', (e) => {
+                if(!ready) return;
+                e.preventDefault();
+                userAdjusted = true;
+                const rect = canvas.getBoundingClientRect();
+                const anchorX = e.clientX - rect.left;
+                const anchorY = e.clientY - rect.top;
+                const factor = Math.pow(IMG_ZOOM_STEP, -e.deltaY / 100);
+                zoomAt(anchorX, anchorY, scale * factor);
+            }, { passive: false });
+
+            // ---- 长按拖动平移(使用 Pointer Events + setPointerCapture, 避免全局 window 监听器随预览重开而累积泄漏) ----
+            let panning = false, panStartX = 0, panStartY = 0, panOrigTx = 0, panOrigTy = 0, activePointerId = null;
+            canvas.addEventListener('pointerdown', (e) => {
+                if(!ready || e.button !== 0) return;
+                panning = true;
+                userAdjusted = true;
+                activePointerId = e.pointerId;
+                panStartX = e.clientX; panStartY = e.clientY;
+                panOrigTx = tx; panOrigTy = ty;
+                canvas.classList.add('panning');
+                canvas.setPointerCapture(e.pointerId);
+                e.preventDefault();
+            });
+            canvas.addEventListener('pointermove', (e) => {
+                if(!panning || e.pointerId !== activePointerId) return;
+                tx = panOrigTx + (e.clientX - panStartX);
+                ty = panOrigTy + (e.clientY - panStartY);
+                applyTransform();
+            });
+            function endPan(e){
+                if(!panning || (e && e.pointerId !== activePointerId)) return;
+                panning = false;
+                canvas.classList.remove('panning');
+                if(activePointerId !== null){ try{ canvas.releasePointerCapture(activePointerId); }catch(_e){} }
+                activePointerId = null;
+            }
+            canvas.addEventListener('pointerup', endPan);
+            canvas.addEventListener('pointercancel', endPan);
+        }
+
         // ===================== 保存与备份 =====================
         async function persistFile(path){
-            if(!path) return;
+            if(!path || myReadonly) return; // 只读模式不回写, 保留脏标记
             // 由服务端按 OT 权威内容落盘, 避免客户端本地视图覆盖并发编辑; 也省一次 HTTP 往返
             socket.emit('save', { path: path, content: normalizeContent(path === currentFile ? getEditorContent() : (fileContentCache[path] ?? '')) });
             dirtySet.delete(path);
@@ -3761,6 +4459,7 @@
             const errors = problemList.filter(p => p.severity === 1).length;
             const warnings = problemList.filter(p => p.severity === 2).length;
             const others = problemList.length - errors - warnings;
+            updateDFrameProblemCount(); // D 框错误/警告计数与问题面板保持同步
             if(problemList.length === 0){
                 problemsSummary.textContent = '';
                 problemsBadge.style.display = 'none';

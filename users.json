@@ -1,0 +1,22 @@
+{
+  "192.168.10.211": {
+    "name": "LanUser",
+    "readonly": false,
+    "code_chars": 17,
+    "creates": 2,
+    "deletes": 0,
+    "uploads": 0,
+    "saves": 1,
+    "last_seen": "2026-08-19 08:25:07"
+  },
+  "127.0.0.1": {
+    "name": "匿名",
+    "readonly": false,
+    "code_chars": 146,
+    "creates": 1,
+    "deletes": 0,
+    "uploads": 0,
+    "saves": 11,
+    "last_seen": "2026-08-19 19:08:55"
+  }
+}

@@ -637,6 +637,9 @@ class ClangdClient:
                                 "snippetSupport": True,
                                 "documentationFormat": ["markdown", "plaintext"],
                             }
+                        },
+                        "definition": {
+                            "linkSupport": False
                         }
                     }
                 },
@@ -791,6 +794,20 @@ class ClangdClient:
             "context": {"triggerKind": 1},
         }, timeout=3)
 
+    def definition(self, full_path, text, line, character):
+        """转到声明/定义: 光标处标识符 → clangd textDocument/definition。
+        clangd 对 declaration 请求的支持不如 definition 稳定, 因此统一走 definition
+        (对函数/变量/类型基本等价于"跳转到声明/定义处", 与 VS Code F12 默认行为一致)。"""
+        uri = path_to_uri(full_path)
+        if uri not in self.opened:
+            self.did_open(full_path, text)
+        elif self.texts.get(uri) != text:
+            self.did_change(full_path, text)
+        return self.request("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        }, timeout=5)
+
     def sync(self, full_path, text):
         """仅同步文档内容(用于实时诊断), 不请求补全。"""
         uri = path_to_uri(full_path)
@@ -815,7 +832,190 @@ clangd.diag_callback = _on_clangd_diagnostics
 
 # ---------- 在线用户 ----------
 presence = {}
-presence_lock = threading.Lock()
+presence_lock = threading.RLock()
+
+# ---------- 用户身份 / 只读模式 / 使用统计 ----------
+# clients: sid -> {"ip", "name", "device"}  当前 socket 连接的身份信息
+# user_store: ip -> {name, readonly, code_chars, creates, deletes, uploads, saves, last_seen}
+#   持久化到 BASE_DIR/users.json, 以 IP 为 key(同一台机子换浏览器/换名字统计仍累计)
+clients = {}
+clients_lock = threading.RLock()
+USERS_DB = os.path.join(BASE_DIR, "users.json")
+user_store = {}
+user_store_lock = threading.Lock()
+user_store_dirty = False
+
+def _local_ip_set():
+    """本机所有 IP(含回环): 从本机访问网页的用户视为管理员。"""
+    ips = {"127.0.0.1", "::1"}
+    try:
+        ips.add(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        ips.add(get_ip())
+    except Exception:
+        pass
+    if psutil:
+        try:
+            for addrs in psutil.net_if_addrs().values():
+                for a in addrs:
+                    if a.address:
+                        ips.add(a.address.split('%')[0])
+        except Exception:
+            pass
+    return ips
+
+LOCAL_IPS = _local_ip_set()
+
+def client_ip():
+    try:
+        return (request.remote_addr or "").strip()
+    except RuntimeError:
+        return ""
+
+def is_admin_ip(ip):
+    return ip in LOCAL_IPS
+
+def is_admin_request():
+    return is_admin_ip(client_ip())
+
+def is_lan_ip(ip):
+    if not ip:
+        return False
+    parts = ip.split('.')
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        a, b = int(parts[0]), int(parts[1])
+        return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31) or a == 127
+    return ip.startswith('fe80:') or ip.startswith('fd')
+
+# 反查局域网 IP 的设备名(NetBIOS/DNS), 进程内缓存; 查不到回退为客户端上报的 UA 标签
+hostname_cache = {}
+hostname_lock = threading.Lock()
+_dns_pool = ThreadPoolExecutor(max_workers=2)
+
+def lookup_hostname(ip):
+    if not is_lan_ip(ip) or ip in ("127.0.0.1", "::1"):
+        return ""
+    with hostname_lock:
+        if ip in hostname_cache:
+            return hostname_cache[ip]
+    name = ""
+    try:
+        fut = _dns_pool.submit(socket.gethostbyaddr, ip)
+        name = ((fut.result(timeout=1.5) or ("",))[0] or "").split('.')[0]
+    except Exception:
+        name = ""
+    with hostname_lock:
+        hostname_cache[ip] = name
+    return name
+
+def device_display(ip, ua_label=""):
+    """展示用设备名: 服务器本机显示主机名, 其他优先反查结果, 否则用浏览器上报标签。"""
+    if is_admin_ip(ip):
+        try:
+            return socket.gethostname() + "（服务器本机）"
+        except Exception:
+            return "服务器本机"
+    with hostname_lock:
+        h = hostname_cache.get(ip, "")
+    return h or ua_label or "未知设备"
+
+def ip_tail(ip):
+    if not ip:
+        return "?"
+    if "." in ip:
+        return "." + ip.rsplit(".", 1)[-1]
+    return ":" + ip.rsplit(":", 1)[-1]
+
+def _load_users():
+    global user_store
+    try:
+        with open(USERS_DB, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        user_store = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        user_store = {}
+
+def _save_users():
+    try:
+        with open(USERS_DB, "w", encoding="utf-8") as f:
+            json.dump(user_store, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[users] 保存用户数据失败: {e}")
+
+def _user_rec(ip):
+    rec = user_store.get(ip)
+    if rec is None:
+        rec = {"name": "", "readonly": False, "code_chars": 0, "creates": 0,
+               "deletes": 0, "uploads": 0, "saves": 0, "last_seen": ""}
+        user_store[ip] = rec
+    return rec
+
+def is_readonly_ip(ip):
+    if not ip or is_admin_ip(ip):
+        return False
+    with user_store_lock:
+        return bool(user_store.get(ip, {}).get("readonly"))
+
+def stat_add(ip, **fields):
+    """累计使用统计(内存累加, 由后台线程每 5s 落盘)。"""
+    global user_store_dirty
+    if not ip:
+        return
+    with user_store_lock:
+        rec = _user_rec(ip)
+        for k, v in fields.items():
+            rec[k] = rec.get(k, 0) + v
+        rec["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        user_store_dirty = True
+
+def user_store_set(ip, save_now=False, **fields):
+    """写入用户数据字段; save_now=True 时立即落盘(只读开关等关键操作)。"""
+    global user_store_dirty
+    if not ip:
+        return
+    with user_store_lock:
+        rec = _user_rec(ip)
+        rec.update(fields)
+        rec["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if save_now:
+            _save_users()
+            user_store_dirty = False
+        else:
+            user_store_dirty = True
+
+def _users_flush_loop():
+    global user_store_dirty
+    while True:
+        time.sleep(5)
+        with user_store_lock:
+            if user_store_dirty:
+                _save_users()
+                user_store_dirty = False
+
+_load_users()
+threading.Thread(target=_users_flush_loop, daemon=True).start()
+
+def build_presence(rel):
+    """构造 presence 事件负载: 每个在线者附带设备名/IP尾/只读/管理员标记, 供前端悬浮展示与管理。"""
+    with presence_lock:
+        sids = dict(presence.get(rel, {}))
+        with clients_lock:
+            info = {sid: dict(clients.get(sid, {})) for sid in sids}
+    users = []
+    for sid, name in sids.items():
+        c = info.get(sid, {})
+        ip = c.get("ip", "")
+        users.append({
+            "sid": sid,
+            "name": name,
+            "ip_tail": ip_tail(ip),
+            "device": device_display(ip, c.get("device", "")),
+            "readonly": is_readonly_ip(ip),
+            "admin": is_admin_ip(ip),
+        })
+    return {"path": rel, "users": users, "sids": list(sids.keys())}
 
 # ---------- OT 操作 (移植 ot.js TextOperation) ----------
 class TextOperation:
@@ -1267,6 +1467,76 @@ def run_process_streaming(cmd, stdin_data="", timeout=CONSOLE_RUN_TIMEOUT, cwd=N
 def index():
     return render_template("index.html")
 
+@app.route("/api/me")
+def api_me():
+    """客户端身份信息: 是否管理员(服务器本机)/是否被设为只读。"""
+    ip = client_ip()
+    with user_store_lock:
+        rec = user_store.get(ip) or {}
+    return jsonify({
+        "ip": ip,
+        "admin": is_admin_ip(ip),
+        "readonly": is_readonly_ip(ip),
+        "name": rec.get("name", ""),
+    })
+
+@app.route("/api/admin/users")
+def api_admin_users():
+    """管理员查看所有用户数据(只读标记/统计), 附带当前在线连接。仅服务器本机可访问。"""
+    if not is_admin_request():
+        return jsonify({"error": "仅服务器本机可查看用户数据"}), 403
+    with user_store_lock:
+        records = []
+        known = set()
+        for ip, r in user_store.items():
+            rec = dict(r)
+            rec["ip"] = ip
+            records.append(rec)
+            known.add(ip)
+    online_by_ip = {}
+    with clients_lock:
+        for sid, c in clients.items():
+            ip = c.get("ip", "")
+            online_by_ip.setdefault(ip, []).append({
+                "sid": sid,
+                "name": c.get("name", ""),
+                "device": device_display(ip, c.get("device", "")),
+            })
+    for rec in records:
+        rec["online"] = online_by_ip.get(rec["ip"], [])
+    # 在线但还没有统计记录的 IP 也列出
+    for ip, onl in online_by_ip.items():
+        if ip and ip not in known:
+            records.append({"ip": ip, "name": onl[0].get("name", ""), "online": onl})
+    return jsonify(records)
+
+@app.route("/api/admin/readonly", methods=["POST"])
+def api_admin_readonly():
+    """管理员把某个 IP 的用户设为/解除只读模式, 立即落盘并实时通知对方。"""
+    if not is_admin_request():
+        return jsonify({"error": "仅服务器本机可管理用户"}), 403
+    data = request.get_json(force=True)
+    ip = str(data.get("ip") or "").strip()
+    flag = bool(data.get("readonly"))
+    if not ip:
+        return jsonify({"error": "缺少 ip"}), 400
+    if is_admin_ip(ip):
+        return jsonify({"error": "不能对服务器本机设置只读"}), 400
+    user_store_set(ip, save_now=True, readonly=flag)
+    # 实时通知目标的所有连接, 并刷新其所在房间的 presence 展示
+    rooms = set()
+    with presence_lock:
+        with clients_lock:
+            for sid, c in clients.items():
+                if c.get("ip") == ip:
+                    socketio.emit("readonly_changed", {"readonly": flag}, room=sid)
+            for rel, users in presence.items():
+                if any(clients.get(sid, {}).get("ip") == ip for sid in users):
+                    rooms.add(rel)
+    for rel in rooms:
+        socketio.emit("presence", build_presence(rel), room=rel)
+    return jsonify({"ok": True})
+
 @app.route("/api/tree")
 def api_tree():
     return jsonify(scan_dir())
@@ -1284,9 +1554,14 @@ def api_read():
     if is_binary_file(full):
         mime = get_mime(full)
         from urllib.parse import quote
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            size = None
         return jsonify({
             "binary": True,
             "mime": mime,
+            "size": size,
             "content": None,
             "url": f"/api/file/raw?path={quote(path)}"
         })
@@ -1305,10 +1580,15 @@ def api_file_raw():
     if not os.path.isfile(full):
         return jsonify({"error": "文件不存在"}), 404
     mime = get_mime(full)
-    return send_from_directory(os.path.dirname(full), os.path.basename(full), mimetype=mime)
+    # download=1 时以附件形式下发(浏览器弹出保存对话框), 实现云盘式下载; 否则内联用于预览
+    as_attachment = request.args.get("download") == "1"
+    return send_from_directory(os.path.dirname(full), os.path.basename(full),
+                               mimetype=mime, as_attachment=as_attachment)
 
 @app.route("/api/file", methods=["POST"])
 def api_save():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     path = data.get("path", "")
     content = data.get("content", "")
@@ -1343,6 +1623,8 @@ def api_save():
 
 @app.route("/api/backup", methods=["POST"])
 def api_backup():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"ok": False, "error": "只读模式：管理员已禁止你修改内容"}), 403
     try:
         data = request.get_json(force=True)
         path = data.get("path", "")
@@ -1360,9 +1642,9 @@ def api_backup():
         if not os.path.isfile(full):
             return jsonify({"ok": False, "error": "文件不存在"}), 404
 
-        client_ip = request.remote_addr or "127.0.0.1"
+        req_ip = request.remote_addr or "127.0.0.1"
         # 用 IP 摘要做后缀: IPv6 地址含冒号, 直接拼进文件名在 Windows 上非法
-        ip_tag = client_ip.split(".")[-1] if re.fullmatch(r"[\d.]+", client_ip) else hashlib.sha256(client_ip.encode()).hexdigest()[:8]
+        ip_tag = req_ip.split(".")[-1] if re.fullmatch(r"[\d.]+", req_ip) else hashlib.sha256(req_ip.encode()).hexdigest()[:8]
 
         base_name = os.path.basename(full)
         backup_name = f"{base_name}_{ip_tag}.bak"
@@ -1386,6 +1668,8 @@ def api_backup():
 
 @app.route("/api/create", methods=["POST"])
 def api_create():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     path = data.get("path", "")
     is_folder = data.get("folder", False)
@@ -1400,11 +1684,14 @@ def api_create():
     else:
         os.makedirs(os.path.dirname(full), exist_ok=True)
         open(full, "w", encoding="utf-8", newline="\n").close()
+    stat_add(client_ip(), creates=1)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True})
 
 @app.route("/api/rename", methods=["POST"])
 def api_rename():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     old = data.get("old", "")
     new = data.get("new", "")
@@ -1435,6 +1722,8 @@ def api_rename():
 
 @app.route("/api/delete", methods=["POST"])
 def api_delete():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     path = data.get("path", "")
     try:
@@ -1467,11 +1756,14 @@ def api_delete():
     # 通知正在编辑被删文件的客户端立即停止编辑, 防止后续 edit/save 把文件"复活"
     for p in deleted_docs:
         socketio.emit('file_deleted', {"path": p}, room=p)
+    stat_add(client_ip(), deletes=1)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True})
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     if "file" not in request.files:
         return jsonify({"error": "没有文件"}), 400
     file = request.files["file"]
@@ -1481,6 +1773,7 @@ def api_upload():
         return jsonify({"error": "非法文件名"}), 400
     save_path = os.path.join(WORKSPACE, filename)
     file.save(save_path)
+    stat_add(client_ip(), uploads=1)
     socketio.emit('tree_changed', {})
     return jsonify({"ok": True, "name": filename})
 
@@ -1489,6 +1782,8 @@ MAX_ZIP_MEMBER_SIZE = 10 * 1024 * 1024  # 测试点单文件解压上限(防 zip
 @app.route("/api/upload_tests", methods=["POST"])
 def api_upload_tests():
     """上传 zip 测试包,解压到 {base}_T/ 文件夹,文件名统一为 {编号}.in/.out。"""
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     if "file" not in request.files:
         return jsonify({"error": "没有文件"}), 400
     file = request.files["file"]
@@ -1641,6 +1936,8 @@ def api_tests():
 
 @app.route("/api/test/save", methods=["POST"])
 def api_test_save():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     path = data.get("path", "")
     content = normalize_newlines(data.get("content", ""))
@@ -1655,6 +1952,8 @@ def api_test_save():
 
 @app.route("/api/test/delete", methods=["POST"])
 def api_test_delete():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     source_path = data.get("path", "")
     test_num = data.get("num")
@@ -1675,6 +1974,8 @@ def api_test_delete():
 
 @app.route("/api/test/add", methods=["POST"])
 def api_test_add():
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     source_path = data.get("path", "")
     try:
@@ -1704,6 +2005,8 @@ def api_test_add():
 @app.route("/api/test/import", methods=["POST"])
 def api_test_import():
     """从另一个源文件的测试点导入到当前文件, 编号冲突时自动重映射(不覆盖原有测试点)。"""
+    if is_readonly_ip(client_ip()):
+        return jsonify({"error": "只读模式：管理员已禁止你修改内容"}), 403
     data = request.get_json(force=True)
     source = data.get("source", "")
     target = data.get("target", "")
@@ -1948,17 +2251,46 @@ def on_join(data):
     rel = data.get("path")
     if not rel:
         return
-    username = data.get("username", "匿名")
+    username = str(data.get("username") or "匿名").strip()[:32] or "匿名"
+    device = str(data.get("device") or "").strip()[:64]
+    ip = client_ip()
+    if not is_admin_ip(ip):
+        # 首次遇到该 IP 时反查设备名(结果进程内缓存, 最多阻塞 1.5s)
+        lookup_hostname(ip)
     join_room(rel)
     with presence_lock:
         presence.setdefault(rel, {})[request.sid] = username
-        users = list(presence[rel].values())
-        sids = list(presence[rel].keys())
-    emit("presence", {"path": rel, "users": users, "sids": sids}, room=rel)
+        with clients_lock:
+            clients[request.sid] = {"ip": ip, "name": username, "device": device}
+    emit("presence", build_presence(rel), room=rel)
+    # 记录该 IP 最近使用的名字, 供管理员查看用户数据
+    user_store_set(ip, name=username)
     # 推送当前权威内容与版本号, 确保新加入者/重连者立即拿到最新文档, 而不是过时的磁盘快照
     content, version = get_doc_content(rel)
     print(f"[join] sid={request.sid} path={rel} v={version} len={len(content)}")
     emit("doc_sync", {"path": rel, "content": content, "version": version}, room=request.sid)
+
+@socketio.on("rename")
+def on_rename(data):
+    """用户点击左下角自己的名字改名: 更新所有所在房间并广播 presence。"""
+    name = str(data.get("name") or "").strip()[:32]
+    if not name:
+        return
+    ip = ""
+    rooms = []
+    with presence_lock:
+        for rel, users in presence.items():
+            if request.sid in users:
+                users[request.sid] = name
+                rooms.append(rel)
+        with clients_lock:
+            if request.sid in clients:
+                clients[request.sid]["name"] = name
+                ip = clients[request.sid].get("ip", "")
+    for rel in rooms:
+        emit("presence", build_presence(rel), room=rel)
+    if ip:
+        user_store_set(ip, name=name)
 
 @socketio.on("leave")
 def on_leave(data):
@@ -1966,35 +2298,35 @@ def on_leave(data):
     if not rel:
         return
     leave_room(rel)
+    empty = False
     with presence_lock:
         if rel in presence and request.sid in presence[rel]:
             del presence[rel][request.sid]
-            users = list(presence[rel].values())
-            sids = list(presence[rel].keys())
             empty = not presence[rel]
-        else:
-            users = []
-            sids = []
-            empty = False
     if empty:
         # 最后一个用户离开时, 把权威内容落盘后淘汰缓存, 保证磁盘始终是最新的
         _flush_and_evict_doc(rel)
-    emit("presence", {"path": rel, "users": users, "sids": sids}, room=rel)
+    emit("presence", build_presence(rel), room=rel)
 
 @socketio.on("disconnect")
 def on_disconnect():
     emptied = []
+    rooms = []
     with presence_lock:
         for rel, users in list(presence.items()):
             if request.sid in users:
                 del users[request.sid]
-                emit("presence", {"path": rel, "users": list(users.values()), "sids": list(users.keys())}, room=rel)
+                rooms.append(rel)
                 if not users:
                     emptied.append(rel)
+    with clients_lock:
+        clients.pop(request.sid, None)
     # 用户是最后在线者的文件: 落盘并淘汰缓存,
     # 避免直接关浏览器(不发 leave)时未保存编辑随进程退出丢失、docs 只增不减
     for rel in emptied:
         _flush_and_evict_doc(rel)
+    for rel in rooms:
+        emit("presence", build_presence(rel), room=rel)
     kill_console(request.sid)
     cleanup_console(request.sid)
 
@@ -2005,6 +2337,11 @@ def on_edit(data):
     if not rel or op_data is None:
         print(f"[edit DEBUG] early return: rel={rel} op_data is None={op_data is None}")
         return {"version": None}
+    # 只读模式: 拒绝协同编辑
+    with clients_lock:
+        c_ip = clients.get(request.sid, {}).get("ip", "")
+    if is_readonly_ip(c_ip):
+        return {"version": None, "readonly": True}
     try:
         base = int(data.get("base")) if data.get("base") is not None else -1
     except (TypeError, ValueError):
@@ -2093,6 +2430,11 @@ def on_edit(data):
         # 在锁内广播可以保证同一文件的所有 edit 事件严格按版本号顺序发出。
         emit("edit", {"path": rel, "op": op_json, "version": final_version}, room=rel, include_self=False)
 
+    # 统计代码量: 按插入的字符数累计到该用户 IP
+    inserted = sum(len(x) for x in op.ops if isinstance(x, str))
+    if inserted:
+        stat_add(c_ip, code_chars=inserted)
+
     return {"version": final_version, "op": op_json, "clamped": clamped, "resync": False}
 
 @socketio.on("cursor")
@@ -2121,6 +2463,12 @@ def on_save(data):
     rel = data.get("path")
     if not rel:
         return
+    # 只读模式: 拒绝保存
+    with clients_lock:
+        c_ip = clients.get(request.sid, {}).get("ip", "")
+    if is_readonly_ip(c_ip):
+        emit("save_error", {"path": rel, "error": "只读模式：管理员已禁止你修改内容"}, room=request.sid)
+        return
     try:
         full = safe_path(rel)
     except ValueError:
@@ -2145,6 +2493,7 @@ def on_save(data):
         print(f"[save] 写盘失败 path={rel}: {e}")
         emit("save_error", {"path": rel, "error": str(e)}, room=request.sid)
         return
+    stat_add(c_ip, saves=1)
     emit("saved", {"path": rel}, room=rel)
 
 @socketio.on("judge_result")
@@ -2210,6 +2559,52 @@ def on_lsp_completion(data):
     elif isinstance(resp, list):
         items = resp
     return {"items": items}
+
+@socketio.on("lsp_definition")
+def on_lsp_definition(data):
+    """转到声明/定义(F12 / 右键菜单): 请求 clangd textDocument/definition,
+    将结果 URI 转回 workspace 相对路径返回给前端, 前端负责打开目标文件并跳转定位。
+    跨文件声明时, uri_to_rel 会把 clangd 返回的 file:// URI 转换成相对路径;
+    若声明位于 workspace 之外(如系统头文件), 返回 outside=True 让前端提示用户。"""
+    rel = data.get("path")
+    if not rel:
+        return {"error": "缺少 path"}
+    text = normalize_newlines(data.get("text", ""))
+    line = int(data.get("line", 0) or 0)
+    character = int(data.get("character", 0) or 0)
+    try:
+        full = safe_path(rel)
+    except ValueError:
+        return {"error": "非法路径"}
+    if not clangd.started:
+        clangd.start()
+    if not clangd.started:
+        return {"error": "clangd 未就绪, 请稍后重试"}
+    resp = clangd.definition(full, text, line, character)
+    # LSP definition 返回值可能是: Location | Location[] | LocationLink[] | null
+    locations = []
+    if isinstance(resp, list):
+        locations = resp
+    elif isinstance(resp, dict):
+        locations = [resp]
+    if not locations:
+        return {"found": False}
+    loc = locations[0]
+    # LocationLink 用 targetUri/targetSelectionRange, 普通 Location 用 uri/range
+    uri = loc.get("uri") or loc.get("targetUri")
+    rng = loc.get("range") or loc.get("targetSelectionRange") or loc.get("targetRange")
+    if not uri or not rng:
+        return {"found": False}
+    target_rel = uri_to_rel(uri)
+    if target_rel is None:
+        return {"found": False, "outside": True}
+    start = rng.get("start", {})
+    return {
+        "found": True,
+        "path": target_rel,
+        "line": int(start.get("line", 0) or 0),
+        "character": int(start.get("character", 0) or 0),
+    }
 
 @socketio.on("run_start")
 def on_run_start(data):
